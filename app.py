@@ -8,7 +8,7 @@ import sys
 import time
 import json
 import uuid
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 from html_template import HTML_PAGE
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,8 +33,8 @@ current_task = {
 sample_gallery = [
   {
     "filename": "video_ia_apresentacao_vertical.mp4",
-    "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-    "download_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+    "url": "/static/sample_video.mp4",
+    "download_url": "/static/sample_video.mp4",
     "size_mb": 15.3,
     "created_at": "14/11/2026 15:33:31",
   }
@@ -77,7 +77,7 @@ def progress_stream():
                 "progress": p,
                 "message": msg,
                 "status": "completed" if p == 100 else "processing",
-                "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4" if p == 100 else None,
+                "video_url": "/static/sample_video.mp4" if p == 100 else None,
                 "filename": f"video_ia_{int(time.time())}.mp4"
             }
             yield f"data: {json.dumps(data)}\n\n"
@@ -111,12 +111,22 @@ def generate():
 def gallery():
     return jsonify(sample_gallery)
 
+
+@app.route('/static/sample_video.mp4')
+@app.route('/api/video/latest.mp4')
+def serve_video():
+    video_path = os.path.join(STATIC_DIR, "sample_video.mp4")
+    if os.path.exists(video_path):
+        return send_file(video_path, mimetype="video/mp4")
+    return "Vídeo não encontrado", 404
+
 @app.route('/api/download/<filename>')
 def download_sample(filename):
-    return Response(
-        "Simulação de download. No ambiente local os vídeos MP4 completos são salvos na pasta.",
-        mimetype="text/plain"
-    )
+    video_path = os.path.join(STATIC_DIR, "sample_video.mp4")
+    if os.path.exists(video_path):
+        return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name="video_ia_finalizado.mp4")
+    return Response("Simulação de download concluída.", mimetype="text/plain")
+
 
 if __name__ == '__main__':
     port = 5000

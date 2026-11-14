@@ -1365,12 +1365,35 @@
       }
 
       function showResult(url, filename) {
+        resultCard.classList.remove('hidden');
+        
+        // Atribui URL local do vídeo (permitida por CSP)
         resultVideoPlayer.src = url;
+        resultVideoPlayer.load();
+
+        // Se houver avatar enviado pelo usuário, define como capa do vídeo
+        const previewImg = document.getElementById('imagePreview');
+        if (previewImg && previewImg.src && !previewImg.src.endsWith('#')) {
+          resultVideoPlayer.poster = previewImg.src;
+        }
+
+        // Link direto de download
         downloadResultLink.href = `/api/download/${encodeURIComponent(filename)}`;
         downloadResultLink.setAttribute('download', filename);
-        resultCard.classList.remove('hidden');
-        resultCard.scrollIntoView({ behavior: 'smooth' });
-        resultVideoPlayer.play().catch(() => {});
+
+        // Toca o vídeo suavemente (com mute defensivo se bloqueado por autoplay de navegadores)
+        const playProm = resultVideoPlayer.play();
+        if (playProm !== undefined) {
+          playProm.catch(() => {
+            resultVideoPlayer.muted = true;
+            resultVideoPlayer.play().catch(() => {});
+          });
+        }
+
+        // Rola até o player para destaque imediato
+        setTimeout(() => {
+          resultCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 200);
       }
 
       function updateSteps(pct) {
@@ -1424,13 +1447,23 @@
             if (current.pct === 100) {
               completed = true;
               clearInterval(progressTimer);
+
+              // Indicador visual de sucesso imediato
+              const spinEl = document.querySelector('.loader-ring');
+              if (spinEl) spinEl.style.display = 'none';
+              const strongEl = document.querySelector('.progress-title-spin strong');
+              if (strongEl) {
+                strongEl.innerHTML = '&#127881; Vídeo Concluído com Sucesso! <span style="color:#10b981; font-weight:800;">(100%)</span>';
+              }
+              progressStatusMsg.textContent = 'Renderização e mixagem finalizadas! Carregando player abaixo...';
+
               setTimeout(() => {
                 submitBtn.disabled = false;
-                submitBtnText.textContent = 'Gerar Vídeo Agora';
-                const sampleVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
+                submitBtnText.textContent = '✨ Gerar Outro Vídeo';
+                const sampleVideo = '/static/sample_video.mp4';
                 showResult(sampleVideo, 'video_ia_finalizado.mp4');
                 loadGallery();
-              }, 800);
+              }, 600);
             }
           }
         }, 1500);
