@@ -1,0 +1,1500 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Studio Video AI - Painel Profissional de Vídeos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  
+  <style>
+    /* ==========================================================
+       TEMA PROFISSIONAL WORDPRESS / SAAS MODERNO (DARK STUDIO)
+       ========================================================== */
+    :root {
+      --bg-body: #0b0f19;
+      --bg-surface: #111827;
+      --bg-card: #1f2937;
+      --bg-card-hover: #283548;
+      --bg-input: #0f172a;
+      
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --primary-glow: rgba(99, 102, 241, 0.35);
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.3);
+      --success: #10b981;
+      --danger: #ef4444;
+      
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --border-focus: #6366f1;
+      
+      --text-main: #f9fafb;
+      --text-muted: #9ca3af;
+      --text-subtle: #6b7280;
+      
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 18px;
+      --shadow-card: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+      --transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+      background-color: var(--bg-body);
+      color: var(--text-main);
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Trava e normaliza TODOS os SVGs para que NUNCA fiquem desproporcionais */
+    svg {
+      display: inline-block;
+      vertical-align: middle;
+      max-width: 100%;
+      height: auto;
+      flex-shrink: 0;
+    }
+
+    .icon-sm { width: 16px; height: 16px; }
+    .icon-md { width: 22px; height: 22px; }
+    .icon-lg { width: 36px; height: 36px; }
+
+    /* Header / Navbar */
+    .wp-navbar {
+      background: rgba(17, 24, 39, 0.95);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-subtle);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      padding: 14px 24px;
+    }
+
+    .navbar-container {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: inherit;
+    }
+
+    .brand-logo {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 16px var(--primary-glow);
+    }
+
+    .brand-logo svg {
+      width: 22px;
+      height: 22px;
+      fill: #ffffff;
+      color: #ffffff;
+    }
+
+    .brand-title {
+      font-size: 1.25rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-title span {
+      background: linear-gradient(90deg, #818cf8, #06b6d4);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .badge-pro {
+      font-size: 0.68rem;
+      font-weight: 700;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid var(--primary);
+      color: #a5b4fc;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      margin-left: 6px;
+      text-transform: uppercase;
+    }
+
+    .system-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #34d399;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #34d399;
+      box-shadow: 0 0 8px #34d399;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.2); }
+    }
+
+    /* Hero Banner */
+    .hero-banner {
+      max-width: 1280px;
+      margin: 24px auto 0;
+      padding: 0 24px;
+      text-align: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      color: #a5b4fc;
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 4px 14px;
+      border-radius: 9999px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .hero-title {
+      font-size: 2.1rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 8px;
+    }
+
+    .hero-title span {
+      background: linear-gradient(90deg, #a5b4fc, #38bdf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-subtitle {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    /* Container Principal */
+    .main-wrap {
+      max-width: 1280px;
+      width: 100%;
+      margin: 28px auto 48px;
+      padding: 0 24px;
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 28px;
+      align-items: start;
+    }
+
+    @media (max-width: 1024px) {
+      .main-wrap {
+        grid-template-columns: 1fr;
+      }
+      .hero-title {
+        font-size: 1.7rem;
+      }
+    }
+
+    /* Cards e Seções Estilo WordPress */
+    .wp-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      box-shadow: var(--shadow-card);
+      margin-bottom: 22px;
+      transition: var(--transition);
+    }
+
+    .wp-card:hover {
+      border-color: rgba(255, 255, 255, 0.14);
+    }
+
+    .card-title-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .card-step-badge {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 8px var(--primary-glow);
+    }
+
+    .card-title {
+      font-size: 1.08rem;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .card-desc {
+      font-size: 0.8rem;
+      color: var(--text-subtle);
+    }
+
+    /* Área de Upload de Imagem */
+    .dropzone-box {
+      border: 2px dashed rgba(255, 255, 255, 0.16);
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: var(--radius-md);
+      padding: 24px 16px;
+      text-align: center;
+      cursor: pointer;
+      position: relative;
+      transition: var(--transition);
+      overflow: hidden;
+    }
+
+    .dropzone-box:hover {
+      border-color: var(--primary);
+      background: rgba(99, 102, 241, 0.05);
+    }
+
+    .dropzone-box input[type="file"] {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .dropzone-icon {
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 10px;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .dropzone-text {
+      font-size: 0.92rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .dropzone-text span {
+      color: var(--accent);
+    }
+
+    .dropzone-hint {
+      font-size: 0.75rem;
+      color: var(--text-subtle);
+    }
+
+    .preview-container {
+      margin-top: 14px;
+      text-align: center;
+      position: relative;
+    }
+
+    .preview-container img {
+      max-width: 100%;
+      max-height: 240px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-subtle);
+      object-fit: cover;
+    }
+
+    /* Chips de Seleção de Presets Locais */
+    .presets-wrapper {
+      margin-top: 14px;
+    }
+
+    .presets-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      display: block;
+    }
+
+    .chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+      outline: none;
+    }
+
+    .chip-item:hover {
+      background: var(--bg-card-hover);
+      color: var(--text-main);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .chip-item.active {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #ffffff;
+      border-color: transparent;
+      box-shadow: 0 2px 10px var(--primary-glow);
+    }
+
+    /* Abas de Entrada (Texto vs Áudio) */
+    .tabs-nav {
+      display: flex;
+      gap: 8px;
+      background: var(--bg-input);
+      padding: 4px;
+      border-radius: var(--radius-sm);
+      margin-bottom: 14px;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .tab-trigger {
+      flex: 1;
+      padding: 8px 14px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .tab-trigger.active {
+      background: var(--primary);
+      color: #ffffff;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    /* Formulários e Inputs Estilo WordPress Moderno */
+    .form-group {
+      margin-bottom: 14px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    textarea, select, input[type="file"], input[type="number"] {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      color: var(--text-main);
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      transition: var(--transition);
+    }
+
+    textarea:focus, select:focus, input[type="number"]:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--primary-glow);
+    }
+
+    /* Sliders de Tempo e Volume */
+    .range-box-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 600px) {
+      .range-box-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .range-card {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      padding: 14px;
+      border-radius: var(--radius-md);
+    }
+
+    .range-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .range-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--accent);
+      background: rgba(6, 182, 212, 0.1);
+      padding: 2px 8px;
+      border-radius: 6px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      -webkit-appearance: none;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      outline: none;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+
+    /* Switch Toggles Estilo iOS */
+    .toggle-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+    }
+
+    .toggle-meta strong {
+      display: block;
+      font-size: 0.88rem;
+      color: var(--text-main);
+    }
+
+    .toggle-meta span {
+      font-size: 0.75rem;
+      color: var(--text-subtle);
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider-round {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: rgba(255, 255, 255, 0.2);
+      transition: .3s;
+      border-radius: 24px;
+    }
+
+    .slider-round:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider-round {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+    }
+
+    input:checked + .slider-round:before {
+      transform: translateX(20px);
+    }
+
+    /* Botão Principal Estilo SaaS High-Converting */
+    .btn-submit-main {
+      width: 100%;
+      padding: 16px 24px;
+      border: none;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, var(--primary) 0%, #8b5cf6 50%, var(--accent) 100%);
+      color: #ffffff;
+      font-size: 1.05rem;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      box-shadow: 0 10px 25px var(--primary-glow);
+      transition: var(--transition);
+    }
+
+    .btn-submit-main:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 15px 35px var(--primary-glow);
+    }
+
+    .btn-submit-main:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-submit-main svg {
+      width: 22px;
+      height: 22px;
+      fill: currentColor;
+    }
+
+    /* Painel de Progresso em Tempo Real */
+    .progress-box {
+      background: rgba(17, 24, 39, 0.95);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      margin-bottom: 22px;
+      box-shadow: 0 0 25px var(--accent-glow);
+    }
+
+    .progress-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .progress-title-spin {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .loader-ring {
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(6, 182, 212, 0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .progress-pct-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: var(--accent);
+    }
+
+    .progress-bar-track {
+      width: 100%;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--primary), var(--accent), #10b981);
+      border-radius: 9999px;
+      transition: width 0.3s ease;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .steps-checklist {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .step-badge-pill {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      color: var(--text-subtle);
+    }
+
+    .step-badge-pill.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(6, 182, 212, 0.1);
+    }
+
+    .step-badge-pill.done {
+      border-color: var(--success);
+      color: var(--success);
+      background: rgba(16, 185, 129, 0.1);
+    }
+
+    /* Player e Download do Vídeo Finalizado */
+    .player-wrap {
+      background: #000;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      aspect-ratio: 9/16;
+      max-height: 480px;
+      margin: 14px auto;
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .player-wrap video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .btn-download-green {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, #10b981, #059669);
+      border: none;
+      border-radius: var(--radius-sm);
+      color: #ffffff;
+      text-decoration: none;
+      font-size: 0.95rem;
+      font-weight: 700;
+      box-shadow: 0 6px 18px rgba(16, 185, 129, 0.3);
+      transition: var(--transition);
+    }
+
+    .btn-download-green:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px rgba(16, 185, 129, 0.4);
+    }
+
+    /* Galeria Estilo Grid WordPress */
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 14px;
+    }
+
+    .gallery-item-card {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: var(--transition);
+    }
+
+    .gallery-item-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+
+    .gallery-thumb {
+      aspect-ratio: 9/16;
+      background: #000;
+      position: relative;
+      cursor: pointer;
+    }
+
+    .gallery-thumb video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .gallery-play-btn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 38px;
+      height: 38px;
+      background: rgba(0, 0, 0, 0.75);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+    }
+
+    .gallery-info-box {
+      padding: 10px;
+      font-size: 0.75rem;
+    }
+
+    .gallery-filename {
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+    }
+
+    .gallery-subtext {
+      color: var(--text-subtle);
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .gallery-btn-dl {
+      display: block;
+      padding: 6px;
+      text-align: center;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-subtle);
+      border-radius: 4px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.72rem;
+    }
+
+    .gallery-btn-dl:hover {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    /* Rodapé */
+    .wp-footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      padding: 20px 24px;
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--text-subtle);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navbar Superior Estilo WordPress SaaS -->
+  <header class="wp-navbar">
+    <div class="navbar-container">
+      <a href="/" class="brand">
+        <div class="brand-logo">
+          <svg class="icon-md" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        </div>
+        <div>
+          <div class="brand-title">Studio <span>Video AI</span> <span class="badge-pro">v2.0</span></div>
+        </div>
+      </a>
+      <div class="system-pill">
+        <span class="status-dot"></span>
+        <span class="status-text" id="systemStatusLabel">Motor de IA Pronto</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Header -->
+  <section class="hero-banner">
+    <div class="hero-badge">IA de Animação Audiovisual • 1080x1920 Vertical</div>
+    <h1 class="hero-title">Painel de Criação e <span>Edição de Vídeo</span></h1>
+    <p class="hero-subtitle">Transforme imagens em vídeos animados realistas com fala sincronizada, expressões faciais, caminhada e trilha sonora mixada.</p>
+  </section>
+
+  <!-- Layout Principal em Grid Responsivo -->
+  <main class="main-wrap">
+
+    <!-- Coluna Esquerda: Formulário de Configuração -->
+    <section>
+      <form id="videoForm">
+
+        <!-- 1. Imagem de Referência -->
+        <div class="wp-card">
+          <div class="card-title-group">
+            <div class="card-step-badge">1</div>
+            <div>
+              <h2 class="card-title">Imagem de Referência</h2>
+              <p class="card-desc">Carregue ou selecione a foto do rosto/personagem para animar</p>
+            </div>
+          </div>
+
+          <div class="dropzone-box" id="dropzoneBox">
+            <input type="file" id="imageInput" accept="image/*">
+            <div id="dropzoneContent">
+              <div class="dropzone-icon">
+                <svg class="icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                  <polyline points="21 15 16 10 5 21"></polyline>
+                </svg>
+              </div>
+              <div class="dropzone-text">Arraste uma foto ou <span>clique para escolher</span></div>
+              <div class="dropzone-hint">Suporta PNG, JPG, JFIF, WEBP (Formato ideal: 9:16 portrait)</div>
+            </div>
+            <div class="preview-container hidden" id="previewContainer">
+              <img id="imagePreviewEl" src="" alt="Pré-visualização">
+            </div>
+          </div>
+
+          <div class="presets-wrapper">
+            <span class="presets-label">Ou selecione uma imagem da pasta local:</span>
+            <div class="chip-list" id="presetImagesChips">
+              <span class="dropzone-hint">Buscando imagens locais...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Roteiro ou Áudio de Fala -->
+        <div class="wp-card">
+          <div class="card-title-group">
+            <div class="card-step-badge">2</div>
+            <div>
+              <h2 class="card-title">Roteiro ou Áudio de Fala</h2>
+              <p class="card-desc">Defina o que a IA vai falar ou suba uma gravação</p>
+            </div>
+          </div>
+
+          <div class="tabs-nav">
+            <button type="button" class="tab-trigger active" data-target="tabText">Texto (Voz da IA)</button>
+            <button type="button" class="tab-trigger" data-target="tabAudio">Upload de Áudio</button>
+          </div>
+
+          <div class="tab-content active" id="tabText">
+            <div class="form-group">
+              <label class="form-label" for="scriptText">Texto do Roteiro:</label>
+              <textarea id="scriptText" rows="4" placeholder="Digite aqui o roteiro da IA... Ex: Não confunda êxito com superioridade. A verdadeira força está na humildade e na honra."></textarea>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="voiceSelect">Voz Neural Realista:</label>
+              <select id="voiceSelect">
+                <optgroup label="Português do Brasil (IA)">
+                  <option value="pt-BR-AntonioNeural" selected>Antonio (Masculino - Firme e Profissional)</option>
+                  <option value="pt-BR-FranciscaNeural">Francisca (Feminino - Clara e Expressiva)</option>
+                  <option value="pt-BR-ThalitaNeural">Thalita (Feminino - Suave e Jovem)</option>
+                </optgroup>
+                <optgroup label="Inglês (Internacional)">
+                  <option value="en-US-GuyNeural">Guy (Masculino Americano)</option>
+                  <option value="en-US-JennyNeural">Jenny (Feminino Americano)</option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
+
+          <div class="tab-content" id="tabAudio">
+            <div class="form-group">
+              <label class="form-label">Arquivo de Áudio de Fala (MP3, WAV, M4A):</label>
+              <input type="file" id="speechInput" accept="audio/*">
+              <p class="dropzone-hint" style="margin-top: 6px;">A IA animará os lábios e expressões sincronizadas com o seu áudio.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Trilha Sonora de Fundo -->
+        <div class="wp-card">
+          <div class="card-title-group">
+            <div class="card-step-badge">3</div>
+            <div>
+              <h2 class="card-title">Trilha Sonora / Fundo Musical</h2>
+              <p class="card-desc">Música ambiente com mixagem automática suave</p>
+            </div>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-meta">
+              <strong>Ativar Música de Fundo</strong>
+              <span>Insere trilha sonora mixada em volume balanceado</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="enableMusicCheck" checked>
+              <span class="slider-round"></span>
+            </label>
+          </div>
+
+          <div id="musicOptionsBox">
+            <div class="form-group">
+              <label class="form-label">Subir nova trilha musical:</label>
+              <input type="file" id="musicInput" accept="audio/*">
+            </div>
+
+            <div class="presets-wrapper">
+              <span class="presets-label">Ou usar trilha da pasta elementos/:</span>
+              <div class="chip-list" id="presetMusicChips">
+                <span class="dropzone-hint">Buscando trilhas locais...</span>
+              </div>
+            </div>
+
+            <div class="range-card" style="margin-top: 14px;">
+              <div class="range-header">
+                <span class="form-label" style="margin: 0;">Volume da Trilha:</span>
+                <span class="range-badge" id="musicVolLabel">18%</span>
+              </div>
+              <input type="range" id="musicVolumeSlider" min="5" max="50" value="18">
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Configuração de Tempo (Mínimo e Máximo) -->
+        <div class="wp-card">
+          <div class="card-title-group">
+            <div class="card-step-badge">4</div>
+            <div>
+              <h2 class="card-title">Controle de Duração do Vídeo</h2>
+              <p class="card-desc">Defina o tempo mínimo e máximo em segundos</p>
+            </div>
+          </div>
+
+          <div class="range-box-grid">
+            <div class="range-card">
+              <div class="range-header">
+                <span class="form-label" style="margin: 0;">Tempo Mínimo:</span>
+                <span class="range-badge" id="minTimeBadge">5s</span>
+              </div>
+              <input type="range" id="minTimeSlider" min="2" max="60" value="5">
+            </div>
+
+            <div class="range-card">
+              <div class="range-header">
+                <span class="form-label" style="margin: 0;">Tempo Máximo:</span>
+                <span class="range-badge" id="maxTimeBadge">60s</span>
+              </div>
+              <input type="range" id="maxTimeSlider" min="5" max="180" value="60">
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Recursos de Animação e Sincronização -->
+        <div class="wp-card">
+          <div class="card-title-group">
+            <div class="card-step-badge">5</div>
+            <div>
+              <h2 class="card-title">Recursos de IA e Efeitos</h2>
+              <p class="card-desc">Ative movimentos corporais, sincronia labial e identidade</p>
+            </div>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-meta">
+              <strong>Sincronização Labial (Fazer a Imagem Falar)</strong>
+              <span>Modulação de mandíbula e boca sincronizada com as palavras</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="enableSpeechCheck" checked>
+              <span class="slider-round"></span>
+            </label>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-meta">
+              <strong>Movimento Corporal / Andar Realista</strong>
+              <span>Simulação de caminhada, oscilação de peso e respiração natural</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="enableWalkCheck" checked>
+              <span class="slider-round"></span>
+            </label>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-meta">
+              <strong>Aplicar Moldura e Logo (elementos/)</strong>
+              <span>Aplica a moldura vertical 9:16 e logo oficial nos cantos</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="enableBrandingCheck" checked>
+              <span class="slider-round"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Botão de Ação -->
+        <button type="submit" id="submitBtn" class="btn-submit-main">
+          <svg class="icon-md" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <span id="submitBtnText">Gerar Vídeo Agora</span>
+        </button>
+
+      </form>
+    </section>
+
+    <!-- Coluna Direita: Progresso em Tempo Real, Player e Galeria -->
+    <section>
+
+      <!-- Card de Progresso em Tempo Real -->
+      <div class="progress-box hidden" id="progressBox">
+        <div class="progress-topbar">
+          <div class="progress-title-spin">
+            <div class="loader-ring"></div>
+            <div>
+              <strong style="display: block; font-size: 0.95rem;">Processando com IA...</strong>
+              <span style="font-size: 0.78rem; color: var(--text-muted);" id="progressStatusMsg">Iniciando tarefas...</span>
+            </div>
+          </div>
+          <div class="progress-pct-label" id="progressPctLabel">0%</div>
+        </div>
+
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progressBarFillEl"></div>
+        </div>
+
+        <div class="steps-checklist">
+          <span class="step-badge-pill" id="st1">1. Voz IA</span>
+          <span class="step-badge-pill" id="st2">2. Fonemas</span>
+          <span class="step-badge-pill" id="st3">3. Animação Facial</span>
+          <span class="step-badge-pill" id="st4">4. Mixagem</span>
+          <span class="step-badge-pill" id="st5">5. Renderização</span>
+        </div>
+      </div>
+
+      <!-- Player de Vídeo Concluído -->
+      <div class="wp-card hidden" id="resultCard">
+        <div class="card-title-group" style="margin-bottom: 8px;">
+          <span class="hero-badge" style="margin: 0; background: rgba(16, 185, 129, 0.15); color: #34d399; border-color: #10b981;">Vídeo Finalizado</span>
+        </div>
+        <div class="player-wrap">
+          <video id="resultVideoPlayer" controls playsinline></video>
+        </div>
+        <a id="downloadResultLink" href="#" download class="btn-download-green">
+          <svg class="icon-md" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          Baixar Vídeo em Alta Qualidade
+        </a>
+      </div>
+
+      <!-- Galeria de Vídeos Prontos -->
+      <div class="wp-card">
+        <div class="card-title-group">
+          <div>
+            <h2 class="card-title">Galeria de Vídeos Gerados</h2>
+            <p class="card-desc" id="galleryCountLabel">0 vídeos prontos</p>
+          </div>
+        </div>
+
+        <div class="gallery-grid" id="galleryGridEl">
+          <div style="grid-column: 1/-1; text-align: center; padding: 24px; color: var(--text-subtle); font-size: 0.85rem;">
+            Nenhum vídeo gerado ainda. Configure ao lado e clique em "Gerar Vídeo Agora"!
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <footer class="wp-footer">
+    <p>Studio Video AI • Plataforma de Geração e Animação Audiovisual Open Source</p>
+  </footer>
+
+  <!-- ==========================================================
+       JAVASCRIPT EMBUTIDO (100% REATIVO, PROGRESSO E SSE)
+       ========================================================== -->
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // Elementos
+      const form = document.getElementById('videoForm');
+      const submitBtn = document.getElementById('submitBtn');
+      const submitBtnText = document.getElementById('submitBtnText');
+      const imageInput = document.getElementById('imageInput');
+      const previewContainer = document.getElementById('previewContainer');
+      const imagePreviewEl = document.getElementById('imagePreviewEl');
+      const dropzoneContent = document.getElementById('dropzoneContent');
+      const presetImagesChips = document.getElementById('presetImagesChips');
+      const presetMusicChips = document.getElementById('presetMusicChips');
+
+      // Sliders
+      const minTimeSlider = document.getElementById('minTimeSlider');
+      const minTimeBadge = document.getElementById('minTimeBadge');
+      const maxTimeSlider = document.getElementById('maxTimeSlider');
+      const maxTimeBadge = document.getElementById('maxTimeBadge');
+      const musicVolumeSlider = document.getElementById('musicVolumeSlider');
+      const musicVolLabel = document.getElementById('musicVolLabel');
+      const enableMusicCheck = document.getElementById('enableMusicCheck');
+      const musicOptionsBox = document.getElementById('musicOptionsBox');
+
+      // Progresso
+      const progressBox = document.getElementById('progressBox');
+      const progressStatusMsg = document.getElementById('progressStatusMsg');
+      const progressPctLabel = document.getElementById('progressPctLabel');
+      const progressBarFillEl = document.getElementById('progressBarFillEl');
+      const st1 = document.getElementById('st1');
+      const st2 = document.getElementById('st2');
+      const st3 = document.getElementById('st3');
+      const st4 = document.getElementById('st4');
+      const st5 = document.getElementById('st5');
+
+      // Resultado e Galeria
+      const resultCard = document.getElementById('resultCard');
+      const resultVideoPlayer = document.getElementById('resultVideoPlayer');
+      const downloadResultLink = document.getElementById('downloadResultLink');
+      const galleryGridEl = document.getElementById('galleryGridEl');
+      const galleryCountLabel = document.getElementById('galleryCountLabel');
+
+      let selectedImagePath = null;
+      let selectedMusicPath = null;
+      let eventSource = null;
+
+      // Sliders sync
+      minTimeSlider.addEventListener('input', (e) => {
+        minTimeBadge.textContent = `${e.target.value}s`;
+        if (parseInt(e.target.value) > parseInt(maxTimeSlider.value)) {
+          maxTimeSlider.value = e.target.value;
+          maxTimeBadge.textContent = `${e.target.value}s`;
+        }
+      });
+
+      maxTimeSlider.addEventListener('input', (e) => {
+        maxTimeBadge.textContent = `${e.target.value}s`;
+        if (parseInt(e.target.value) < parseInt(minTimeSlider.value)) {
+          minTimeSlider.value = e.target.value;
+          minTimeBadge.textContent = `${e.target.value}s`;
+        }
+      });
+
+      musicVolumeSlider.addEventListener('input', (e) => {
+        musicVolLabel.textContent = `${e.target.value}%`;
+      });
+
+      enableMusicCheck.addEventListener('change', (e) => {
+        musicOptionsBox.style.display = e.target.checked ? 'block' : 'none';
+      });
+
+      // Abas
+      document.querySelectorAll('.tab-trigger').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.tab-trigger').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+          btn.classList.add('active');
+          const target = document.getElementById(btn.dataset.target);
+          if (target) target.classList.add('active');
+        });
+      });
+
+      // Preview de Upload
+      imageInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files[0]) {
+          selectedImagePath = null;
+          clearChips(presetImagesChips);
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            imagePreviewEl.src = evt.target.result;
+            dropzoneContent.classList.add('hidden');
+            previewContainer.classList.remove('hidden');
+          };
+          reader.readAsDataURL(e.target.files[0]);
+        }
+      });
+
+      function clearChips(container) {
+        container.querySelectorAll('.chip-item').forEach(c => c.classList.remove('active'));
+      }
+
+      // Assets locais
+      async function loadPresets() {
+        try {
+          const res = await fetch('/api/assets');
+          const data = await res.json();
+
+          if (data.images && data.images.length > 0) {
+            presetImagesChips.innerHTML = '';
+            data.images.forEach((img, idx) => {
+              const chip = document.createElement('button');
+              chip.type = 'button';
+              chip.className = 'chip-item';
+              chip.textContent = img.name;
+              chip.addEventListener('click', () => {
+                clearChips(presetImagesChips);
+                chip.classList.add('active');
+                selectedImagePath = img.path;
+                imageInput.value = '';
+                const folderUrl = img.folder.replace(' ', '_');
+                imagePreviewEl.src = `/api/asset-file/${folderUrl}/${encodeURIComponent(img.name)}`;
+                dropzoneContent.classList.add('hidden');
+                previewContainer.classList.remove('hidden');
+              });
+
+              if (idx === 0) chip.click();
+              presetImagesChips.appendChild(chip);
+            });
+          }
+
+          if (data.musics && data.musics.length > 0) {
+            presetMusicChips.innerHTML = '';
+            data.musics.forEach((m, idx) => {
+              const chip = document.createElement('button');
+              chip.type = 'button';
+              chip.className = 'chip-item';
+              chip.textContent = m.name;
+              chip.addEventListener('click', () => {
+                clearChips(presetMusicChips);
+                chip.classList.add('active');
+                selectedMusicPath = m.path;
+                document.getElementById('musicInput').value = '';
+              });
+
+              if (idx === 0) chip.click();
+              presetMusicChips.appendChild(chip);
+            });
+          }
+        } catch (e) {
+          console.warn('Erro presets:', e);
+        }
+      }
+
+      // Galeria
+      async function loadGallery() {
+        try {
+          const res = await fetch('/api/gallery');
+          const videos = await res.json();
+          galleryCountLabel.textContent = `${videos.length} vídeo${videos.length !== 1 ? 's' : ''} pronto${videos.length !== 1 ? 's' : ''}`;
+
+          if (videos.length === 0) {
+            galleryGridEl.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 24px; color: var(--text-subtle); font-size: 0.85rem;">Nenhum vídeo gerado ainda. Crie o primeiro ao lado!</div>';
+            return;
+          }
+
+          galleryGridEl.innerHTML = '';
+          videos.forEach(v => {
+            const card = document.createElement('div');
+            card.className = 'gallery-item-card';
+            card.innerHTML = `
+              <div class="gallery-thumb" title="Clique para assistir">
+                <video preload="metadata" src="${v.url}#t=0.5"></video>
+                <div class="gallery-play-btn"><svg class="icon-sm" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>
+              </div>
+              <div class="gallery-info-box">
+                <div class="gallery-filename" title="${v.filename}">${v.filename}</div>
+                <div class="gallery-subtext"><span>${v.created_at}</span><span>${v.size_mb} MB</span></div>
+                <a href="${v.download_url}" download class="gallery-btn-dl">Baixar MP4</a>
+              </div>
+            `;
+            card.querySelector('.gallery-thumb').addEventListener('click', () => {
+              showResult(v.url, v.filename);
+            });
+            galleryGridEl.appendChild(card);
+          });
+        } catch (e) {
+          console.warn('Erro galeria:', e);
+        }
+      }
+
+      function showResult(url, filename) {
+        resultVideoPlayer.src = url;
+        downloadResultLink.href = `/api/download/${encodeURIComponent(filename)}`;
+        downloadResultLink.setAttribute('download', filename);
+        resultCard.classList.remove('hidden');
+        resultCard.scrollIntoView({ behavior: 'smooth' });
+        resultVideoPlayer.play().catch(() => {});
+      }
+
+      function updateSteps(pct) {
+        const steps = [
+          { el: st1, min: 5, max: 20 },
+          { el: st2, min: 21, max: 35 },
+          { el: st3, min: 36, max: 75 },
+          { el: st4, min: 76, max: 88 },
+          { el: st5, min: 89, max: 100 }
+        ];
+        steps.forEach(s => {
+          s.el.classList.remove('active', 'done');
+          if (pct >= s.max) s.el.classList.add('done');
+          else if (pct >= s.min) s.el.classList.add('active');
+        });
+      }
+
+      function listenProgress(taskId) {
+        if (eventSource) eventSource.close();
+        progressBox.classList.remove('hidden');
+        progressBox.scrollIntoView({ behavior: 'smooth' });
+
+        eventSource = new EventSource('/api/progress-stream');
+        eventSource.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            const pct = data.progress || 0;
+            progressBarFillEl.style.width = `${pct}%`;
+            progressPctLabel.textContent = `${pct}%`;
+            progressStatusMsg.textContent = data.message || 'Processando...';
+            updateSteps(pct);
+
+            if (data.status === 'completed' && data.video_url) {
+              eventSource.close();
+              submitBtn.disabled = false;
+              submitBtnText.textContent = 'Gerar Vídeo Agora';
+              showResult(data.video_url, data.filename);
+              loadGallery();
+            } else if (data.status === 'error') {
+              eventSource.close();
+              submitBtn.disabled = false;
+              submitBtnText.textContent = 'Gerar Vídeo Agora';
+              alert(data.error || 'Erro durante a geração');
+            }
+          } catch (err) {}
+        };
+      }
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const activeTab = document.querySelector('.tab-trigger.active').dataset.target;
+        const scriptText = document.getElementById('scriptText').value.trim();
+        const speechInput = document.getElementById('speechInput');
+
+        if (activeTab === 'tabText' && !scriptText) {
+          alert('Por favor, digite o texto do roteiro.');
+          return;
+        }
+
+        if (activeTab === 'tabAudio' && (!speechInput.files || speechInput.files.length === 0)) {
+          alert('Por favor, selecione um arquivo de áudio de fala.');
+          return;
+        }
+
+        if (!imageInput.files[0] && !selectedImagePath) {
+          alert('Por favor, envie ou selecione uma imagem de referência.');
+          return;
+        }
+
+        const formData = new FormData();
+        if (imageInput.files[0]) formData.append('image_file', imageInput.files[0]);
+        else if (selectedImagePath) formData.append('selected_image', selectedImagePath);
+
+        if (activeTab === 'tabText') {
+          formData.append('script_text', scriptText);
+          formData.append('voice', document.getElementById('voiceSelect').value);
+        } else if (speechInput.files[0]) {
+          formData.append('speech_file', speechInput.files[0]);
+        }
+
+        const enableMusic = enableMusicCheck.checked;
+        formData.append('enable_music', enableMusic ? 'true' : 'false');
+        if (enableMusic) {
+          const musicInput = document.getElementById('musicInput');
+          if (musicInput.files[0]) formData.append('music_file', musicInput.files[0]);
+          else if (selectedMusicPath) formData.append('selected_music', selectedMusicPath);
+          formData.append('music_volume', (parseFloat(musicVolumeSlider.value) / 100).toFixed(2));
+        }
+
+        formData.append('min_duration', minTimeSlider.value);
+        formData.append('max_duration', maxTimeSlider.value);
+        formData.append('enable_speech', document.getElementById('enableSpeechCheck').checked ? 'true' : 'false');
+        formData.append('enable_walk', document.getElementById('enableWalkCheck').checked ? 'true' : 'false');
+        formData.append('use_frame', document.getElementById('enableBrandingCheck').checked ? 'true' : 'false');
+        formData.append('use_logo', document.getElementById('enableBrandingCheck').checked ? 'true' : 'false');
+
+        submitBtn.disabled = true;
+        submitBtnText.textContent = 'Processando com IA...';
+
+        try {
+          const res = await fetch('/api/generate', { method: 'POST', body: formData });
+          const data = await res.json();
+          if (!data.success) {
+            alert(data.error || 'Erro ao iniciar geração.');
+            submitBtn.disabled = false;
+            submitBtnText.textContent = 'Gerar Vídeo Agora';
+            return;
+          }
+          listenProgress(data.task_id);
+        } catch (err) {
+          alert('Falha na comunicação com o servidor.');
+          submitBtn.disabled = false;
+          submitBtnText.textContent = 'Gerar Vídeo Agora';
+        }
+      });
+
+      // Info do sistema
+      fetch('/api/system-info')
+        .then(r => r.json())
+        .then(info => {
+          const lbl = document.getElementById('systemStatusLabel');
+          if (info.is_vercel) lbl.textContent = 'Modo Cloud Vercel (Online)';
+          else lbl.textContent = 'Motor de IA Pronto (GPU Local)';
+        })
+        .catch(() => {});
+
+      loadPresets();
+      loadGallery();
+    });
+  </script>
+</body>
+</html>
