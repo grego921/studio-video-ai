@@ -1,6 +1,6 @@
 """
 Servidor Web Flask - Painel Profissional de Vídeo IA (WordPress SaaS Dark)
-Compatível com Vercel Serverless e Execução Local
+Compatível com Vercel Serverless e Execução Local no Windows
 """
 
 import os
@@ -8,8 +8,8 @@ import sys
 import time
 import json
 import uuid
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, request, jsonify, Response
+from html_template import HTML_PAGE
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(ROOT_DIR, "templates")
@@ -17,16 +17,6 @@ STATIC_DIR = os.path.join(ROOT_DIR, "static")
 
 app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-
-# Cache de HTML de segurança para nunca falhar na Vercel
-INDEX_HTML_PATH = os.path.join(TEMPLATE_DIR, "index.html")
-CACHED_HTML = None
-if os.path.exists(INDEX_HTML_PATH):
-    try:
-        with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
-            CACHED_HTML = f.read()
-    except Exception:
-        pass
 
 # Estado global da tarefa
 current_task = {
@@ -50,17 +40,14 @@ sample_gallery = [
   }
 ]
 
-@app.route('/')
-@app.route('/api')
-@app.route('/api/index')
-@app.route('/api/index.py')
+@app.route('/', methods=['GET', 'POST'])
+@app.route('/api', methods=['GET', 'POST'])
+@app.route('/api/index', methods=['GET', 'POST'])
+@app.route('/api/index.py', methods=['GET', 'POST'])
 def index():
-    if CACHED_HTML:
-        return Response(CACHED_HTML, mimetype="text/html")
-    try:
-        return render_template('index.html')
-    except Exception:
-        return "<h1>Studio Video AI</h1><p>Carregando painel...</p>", 200
+    if request.method == 'POST':
+        return generate()
+    return Response(HTML_PAGE, mimetype="text/html")
 
 @app.route('/api/system-info')
 def system_info():
@@ -68,7 +55,7 @@ def system_info():
     return jsonify({
         "is_vercel": is_vercel,
         "environment": "Vercel Cloud Serverless" if is_vercel else "Local PC",
-        "engine": "Open Source Video AI"
+        "engine": "Open Source Video AI (C:\\Open sorce geração de vídeos)"
     })
 
 @app.route('/api/status')
@@ -134,7 +121,7 @@ def download_sample(filename):
 if __name__ == '__main__':
     port = 5000
     print("=" * 60)
-    print("   STUDIO VIDEO AI - PAINEL PROFISSIONAL")
+    print("   STUDIO VIDEO AI - PAINEL PROFISSIONAL WORDPRESS SAAS DARK")
     print(f"   Iniciando em: http://localhost:{port}")
     print("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)

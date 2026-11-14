@@ -1,20 +1,20 @@
 @echo off
 chcp 65001 > nul
-title OpenHiggsfield AI - Geração de Vídeos Open-Source
+title Studio Video AI - Painel Profissional Local
 color 0B
 
 echo ================================================================
-echo       OPEN HIGGSFIELD AI - GERAÇÃO DE VÍDEOS OPEN-SOURCE
+echo       STUDIO VIDEO AI - PAINEL PROFISSIONAL DE VIDEO IA
 echo ================================================================
 echo.
-echo [1/2] Iniciando o servidor Next.js na porta 3000...
-echo [2/2] Abrindo http://localhost:3000 no navegador...
+echo [1/2] Iniciando o servidor local na porta 5000...
+echo [2/2] Abrindo http://localhost:5000 no seu navegador...
 echo.
 
-cd /d "C:\Open sorce geração de vídeos"
+cd /d "%~dp0"
 
-start "" http://localhost:3000
+start "" http://localhost:5000
 
-call pnpm dev
+python app.py
 
 pause
