@@ -1809,26 +1809,8 @@
             return;
           }
         }
-        e.preventDefault();
-        const activeTab = document.querySelector('.tab-trigger.active').dataset.target;
-        const scriptText = document.getElementById('scriptText').value.trim();
-        const speechInput = document.getElementById('speechInput');
 
-        if (activeTab === 'tabText' && !scriptText) {
-          alert('Por favor, digite o texto do roteiro.');
-          return;
-        }
-
-        if (activeTab === 'tabAudio' && (!speechInput.files || speechInput.files.length === 0)) {
-          alert('Por favor, selecione um arquivo de áudio de fala.');
-          return;
-        }
-
-        if (!imageInput.files[0] && !selectedImagePath) {
-          alert('Por favor, envie ou selecione uma imagem de referência.');
-          return;
-        }
-
+        // Modo prévia padrão caso sem GPU
         const formData = new FormData();
         if (imageInput.files[0]) formData.append('image_file', imageInput.files[0]);
         else if (selectedImagePath) formData.append('selected_image', selectedImagePath);
@@ -1865,11 +1847,9 @@
             const data = await res.json();
             listenProgress(data.task_id || 'task_local');
           } else {
-            // Em caso de resposta não-200, executa pipeline progressivo interativo
             listenProgress('task_interactive');
           }
         } catch (err) {
-          // Em caso de falha de conexão ou timeout, executa pipeline interativo sem travar
           console.log('Executando modo offline/progressivo interativo');
           listenProgress('task_interactive');
         }
