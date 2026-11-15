@@ -1921,19 +1921,27 @@
       }
 
       if (openGpuBridgeBtn) {
-        openGpuBridgeBtn.addEventListener('click', () => {
-          gpuModalOverlay.classList.add('active');
+        openGpuBridgeBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (gpuModalOverlay) {
+            gpuModalOverlay.style.display = 'flex';
+            gpuModalOverlay.classList.add('active');
+          }
           if (savedGpuUrl) verifyGpuConnection(savedGpuUrl, true);
         });
       }
       if (closeGpuModalBtn) {
         closeGpuModalBtn.addEventListener('click', () => {
+          gpuModalOverlay.style.display = 'none';
           gpuModalOverlay.classList.remove('active');
         });
       }
       if (gpuModalOverlay) {
         gpuModalOverlay.addEventListener('click', (e) => {
-          if (e.target === gpuModalOverlay) gpuModalOverlay.classList.remove('active');
+          if (e.target === gpuModalOverlay) {
+            gpuModalOverlay.style.display = 'none';
+            gpuModalOverlay.classList.remove('active');
+          }
         });
       }
       if (saveGpuBridgeBtn) {
