@@ -1725,8 +1725,22 @@
         if (savedGpuUrl) {
           submitBtn.disabled = true;
           submitBtnText.textContent = 'Renderizando na GPU T4...';
-          progressCard.style.display = 'block';
-          progressCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          
+          progressBox.classList.remove('hidden');
+          progressBox.style.display = 'block';
+          progressBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+          const spinEl = document.querySelector('.loader-ring');
+          if (spinEl) spinEl.style.display = 'inline-block';
+          const strongEl = document.querySelector('.progress-title-spin strong');
+          if (strongEl) {
+            strongEl.innerHTML = 'IA Processando Vídeo Neural 3D... <span style="color:#6366f1; font-weight:800;">(GPU Colab)</span>';
+          }
+
+          progressBarFillEl.style.width = '12%';
+          progressPctLabel.textContent = '12%';
+          progressStatusMsg.textContent = 'Enviando parâmetros e iniciando GPU NVIDIA T4...';
+          updateSteps(12);
 
           const neuralFormData = new FormData();
           if (imageInput.files[0]) {
@@ -1745,16 +1759,12 @@
           neuralFormData.append('still_mode', 'true');
 
           const stages = [
-            { pct: 15, msg: 'Sintetizando áudio neural com sincronia...' },
-            { pct: 35, msg: 'Mapeando malha 3D e pontos faciais do personagem...' },
-            { pct: 60, msg: 'Renderizando movimentos de boca e cabeça com IA...' },
-            { pct: 85, msg: 'Aplicando aprimoramento facial HD (GFPGAN)...' }
+            { pct: 25, msg: '1/4 Sintetizando áudio neural com sincronia...' },
+            { pct: 50, msg: '2/4 Mapeando malha 3D e pontos faciais do personagem...' },
+            { pct: 75, msg: '3/4 Renderizando movimentos de boca e cabeça com IA...' },
+            { pct: 90, msg: '4/4 Aplicando aprimoramento facial HD (GFPGAN)...' }
           ];
           let sIdx = 0;
-          progressBarFillEl.style.width = '10%';
-          progressPctLabel.textContent = '10%';
-          progressStatusMsg.textContent = 'Enviando pacote para o Motor GPU NVIDIA T4...';
-          updateSteps(10);
 
           const neuralProgressInterval = setInterval(() => {
             if (sIdx < stages.length) {
@@ -1764,10 +1774,15 @@
               updateSteps(stages[sIdx].pct);
               sIdx++;
             }
-          }, 8000);
+          }, 9000);
 
           try {
-            const cleanGpuUrl = savedGpuUrl.replace(/\/+$/, '');
+            let cleanGpuUrl = (savedGpuUrl || '').trim().replace(/\/+$/, '');
+            if (!cleanGpuUrl.startsWith('http://') && !cleanGpuUrl.startsWith('https://')) {
+              cleanGpuUrl = 'https://' + cleanGpuUrl;
+            }
+
+            console.log('Enviando requisição para o Motor GPU:', `${cleanGpuUrl}/api/generate_neural_video`);
             const resp = await fetch(`${cleanGpuUrl}/api/generate_neural_video`, {
               method: 'POST',
               body: neuralFormData
@@ -1777,7 +1792,7 @@
 
             if (!resp.ok) {
               const errData = await resp.json().catch(() => ({}));
-              throw new Error(errData.error || 'Erro na resposta do Motor GPU');
+              throw new Error(errData.error || `Erro HTTP ${resp.status} do Motor GPU`);
             }
 
             const data = await resp.json();
@@ -1787,13 +1802,15 @@
               progressStatusMsg.textContent = 'Vídeo 3D gerado com sucesso pelo Motor GPU!';
               updateSteps(100);
 
-              const spinEl = document.querySelector('.loader-ring');
               if (spinEl) spinEl.style.display = 'none';
+              if (strongEl) {
+                strongEl.innerHTML = '&#127881; Vídeo Concluído com Sucesso! <span style="color:#10b981; font-weight:800;">(100%)</span>';
+              }
 
               const videoFinalUrl = data.video_base64 || `${cleanGpuUrl}${data.video_url}`;
               setTimeout(() => {
                 submitBtn.disabled = false;
-                submitBtnText.textContent = 'Gerar Novo Vídeo';
+                submitBtnText.textContent = '✨ Gerar Outro Vídeo';
                 showResult(videoFinalUrl, data.filename || 'video_neural_ia.mp4');
                 loadGallery();
               }, 600);
@@ -1803,8 +1820,10 @@
             }
           } catch (gpuErr) {
             clearInterval(neuralProgressInterval);
+            submitBtn.disabled = false;
+            submitBtnText.textContent = 'Gerar Vídeo Agora';
             console.error('Falha na renderização neural:', gpuErr);
-            alert('Aviso do Motor GPU: ' + gpuErr.message + '\n\nAlternando para prévia interativa do estúdio...');
+            alert('Aviso do Motor GPU: ' + gpuErr.message + '\n\nAlternando para prévia interativa...');
             listenProgress('task_interactive');
             return;
           }
