@@ -857,6 +857,176 @@
     .hidden {
       display: none !important;
     }
+  
+    /* Botão de Conexão com Motor GPU Colab */
+    .gpu-bridge-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #c7d2fe;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+    .gpu-bridge-pill:hover {
+      background: rgba(99, 102, 241, 0.22);
+      border-color: rgba(99, 102, 241, 0.6);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+    }
+    .gpu-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #f59e0b;
+      box-shadow: 0 0 8px #f59e0b;
+      transition: all 0.3s ease;
+    }
+    .gpu-dot.connected {
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+    }
+
+    /* Modal de Conexão GPU */
+    .gpu-modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .gpu-modal-overlay.active {
+      display: flex;
+    }
+    .gpu-modal-card {
+      background: #111827;
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      border-radius: 20px;
+      max-width: 520px;
+      width: 100%;
+      padding: 28px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 30px rgba(99, 102, 241, 0.2);
+      position: relative;
+    }
+    .gpu-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .gpu-modal-title {
+      font-size: 1.25rem;
+      font-weight: 800;
+      color: #f9fafb;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .gpu-modal-close {
+      background: transparent;
+      border: none;
+      color: #9ca3af;
+      font-size: 1.5rem;
+      cursor: pointer;
+      line-height: 1;
+      padding: 4px;
+    }
+    .gpu-modal-close:hover { color: #fff; }
+    .gpu-modal-desc {
+      font-size: 0.88rem;
+      color: #9ca3af;
+      line-height: 1.5;
+      margin-bottom: 20px;
+    }
+    .gpu-input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .gpu-input-group label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #c7d2fe;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .gpu-input-group input {
+      background: #0f172a;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 0.92rem;
+      outline: none;
+      transition: all 0.2s;
+    }
+    .gpu-input-group input:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+    }
+    .gpu-modal-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    .gpu-btn-primary {
+      flex: 1;
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      border: none;
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .gpu-btn-primary:hover {
+      background: linear-gradient(135deg, #4f46e5, #4338ca);
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+    }
+    .gpu-btn-secondary {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #d1d5db;
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .gpu-btn-secondary:hover { background: rgba(255, 255, 255, 0.1); }
+    .gpu-feedback-box {
+      margin-top: 14px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      display: none;
+    }
+    .gpu-feedback-box.success {
+      display: block;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: #34d399;
+    }
+    .gpu-feedback-box.error {
+      display: block;
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #f87171;
+    }
+
   </style>
 </head>
 <body>
@@ -872,12 +1042,42 @@
           <div class="brand-title">Studio <span>Video AI</span> <span class="badge-pro">v2.0</span></div>
         </div>
       </a>
-      <div class="system-pill">
-        <span class="status-dot"></span>
-        <span class="status-text" id="systemStatusLabel">Motor de IA Pronto</span>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <button type="button" id="openGpuBridgeBtn" class="gpu-bridge-pill" title="Configurar conexão direta com o Motor GPU Colab">
+          <span class="gpu-dot" id="gpuStatusDot"></span>
+          <span id="gpuStatusLabel">Conectar Motor GPU</span>
+        </button>
+        <div class="system-pill">
+          <span class="status-dot"></span>
+          <span class="status-text" id="systemStatusLabel">Motor de IA Pronto</span>
+        </div>
       </div>
     </div>
   </header>
+
+  <!-- Modal Conexão GPU Colab -->
+  <div class="gpu-modal-overlay" id="gpuModalOverlay">
+    <div class="gpu-modal-card">
+      <div class="gpu-modal-header">
+        <div class="gpu-modal-title">
+          <span>⚡</span> Conectar Motor GPU (Google Colab)
+        </div>
+        <button type="button" class="gpu-modal-close" id="closeGpuModalBtn">&times;</button>
+      </div>
+      <p class="gpu-modal-desc">
+        Conecte a superplaca gratuita <strong>NVIDIA T4 de 15 GB</strong> rodando em segundo plano no Google Colab. Assim que conectado, <strong>todo o processamento neural de vídeo 3D de alta fidelidade é feito direto pelo seu site</strong>.
+      </p>
+      <div class="gpu-input-group">
+        <label for="gpuBridgeUrlInput">URL Pública do Motor GPU (Cloudflare Tunnel)</label>
+        <input type="url" id="gpuBridgeUrlInput" placeholder="https://seu-link-aqui.trycloudflare.com" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="gpu-feedback-box" id="gpuFeedbackBox"></div>
+      <div class="gpu-modal-actions">
+        <button type="button" class="gpu-btn-primary" id="saveGpuBridgeBtn">Salvar e Conectar</button>
+        <button type="button" class="gpu-btn-secondary" id="disconnectGpuBtn">Desconectar</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Hero Header -->
   <section class="hero-banner">
@@ -1498,7 +1698,117 @@
         } catch(e) {}
       }
 
-      form.addEventListener('submit', async (e) => {
+            form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const activeTab = document.querySelector('.tab-trigger.active').dataset.target;
+        const scriptText = document.getElementById('scriptText').value.trim();
+        const speechInput = document.getElementById('speechInput');
+
+        if (activeTab === 'tabText' && !scriptText) {
+          alert('Por favor, digite o texto do roteiro.');
+          return;
+        }
+
+        if (activeTab === 'tabAudio' && (!speechInput.files || speechInput.files.length === 0)) {
+          alert('Por favor, selecione um arquivo de áudio de fala.');
+          return;
+        }
+
+        if (!imageInput.files[0] && !selectedImagePath) {
+          alert('Por favor, envie ou selecione uma imagem de referência.');
+          return;
+        }
+
+        // ==============================================================
+        // SE MOTOR GPU COLAB ESTIVER CONECTADO: RENDERIZAÇÃO REAL 3D NEURAL
+        // ==============================================================
+        if (savedGpuUrl) {
+          submitBtn.disabled = true;
+          submitBtnText.textContent = 'Renderizando na GPU T4...';
+          progressCard.style.display = 'block';
+          progressCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+          const neuralFormData = new FormData();
+          if (imageInput.files[0]) {
+            neuralFormData.append('image_file', imageInput.files[0]);
+          } else {
+            neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
+          }
+
+          if (activeTab === 'tabText') {
+            neuralFormData.append('script_text', scriptText);
+            neuralFormData.append('voice', document.getElementById('voiceSelect').value);
+          } else if (speechInput.files[0]) {
+            neuralFormData.append('speech_file', speechInput.files[0]);
+          }
+          neuralFormData.append('use_enhancer', 'true');
+          neuralFormData.append('still_mode', 'true');
+
+          const stages = [
+            { pct: 15, msg: 'Sintetizando áudio neural com sincronia...' },
+            { pct: 35, msg: 'Mapeando malha 3D e pontos faciais do personagem...' },
+            { pct: 60, msg: 'Renderizando movimentos de boca e cabeça com IA...' },
+            { pct: 85, msg: 'Aplicando aprimoramento facial HD (GFPGAN)...' }
+          ];
+          let sIdx = 0;
+          progressBarFillEl.style.width = '10%';
+          progressPctLabel.textContent = '10%';
+          progressStatusMsg.textContent = 'Enviando pacote para o Motor GPU NVIDIA T4...';
+          updateSteps(10);
+
+          const neuralProgressInterval = setInterval(() => {
+            if (sIdx < stages.length) {
+              progressBarFillEl.style.width = `${stages[sIdx].pct}%`;
+              progressPctLabel.textContent = `${stages[sIdx].pct}%`;
+              progressStatusMsg.textContent = stages[sIdx].msg;
+              updateSteps(stages[sIdx].pct);
+              sIdx++;
+            }
+          }, 8000);
+
+          try {
+            const cleanGpuUrl = savedGpuUrl.replace(/\/+$/, '');
+            const resp = await fetch(`${cleanGpuUrl}/api/generate_neural_video`, {
+              method: 'POST',
+              body: neuralFormData
+            });
+
+            clearInterval(neuralProgressInterval);
+
+            if (!resp.ok) {
+              const errData = await resp.json().catch(() => ({}));
+              throw new Error(errData.error || 'Erro na resposta do Motor GPU');
+            }
+
+            const data = await resp.json();
+            if (data.success) {
+              progressBarFillEl.style.width = '100%';
+              progressPctLabel.textContent = '100%';
+              progressStatusMsg.textContent = 'Vídeo 3D gerado com sucesso pelo Motor GPU!';
+              updateSteps(100);
+
+              const spinEl = document.querySelector('.loader-ring');
+              if (spinEl) spinEl.style.display = 'none';
+
+              const videoFinalUrl = data.video_base64 || `${cleanGpuUrl}${data.video_url}`;
+              setTimeout(() => {
+                submitBtn.disabled = false;
+                submitBtnText.textContent = 'Gerar Novo Vídeo';
+                showResult(videoFinalUrl, data.filename || 'video_neural_ia.mp4');
+                loadGallery();
+              }, 600);
+              return;
+            } else {
+              throw new Error(data.error || 'Falha no processamento');
+            }
+          } catch (gpuErr) {
+            clearInterval(neuralProgressInterval);
+            console.error('Falha na renderização neural:', gpuErr);
+            alert('Aviso do Motor GPU: ' + gpuErr.message + '\n\nAlternando para prévia interativa do estúdio...');
+            listenProgress('task_interactive');
+            return;
+          }
+        }
         e.preventDefault();
         const activeTab = document.querySelector('.tab-trigger.active').dataset.target;
         const scriptText = document.getElementById('scriptText').value.trim();
@@ -1574,6 +1884,118 @@
           else lbl.textContent = 'Motor de IA Pronto (GPU Local)';
         })
         .catch(() => {});
+
+      
+      // ==============================================================
+      // GESTÃO DA PONTE COM MOTOR GPU DO GOOGLE COLAB
+      // ==============================================================
+      const openGpuBridgeBtn = document.getElementById('openGpuBridgeBtn');
+      const closeGpuModalBtn = document.getElementById('closeGpuModalBtn');
+      const gpuModalOverlay = document.getElementById('gpuModalOverlay');
+      const gpuBridgeUrlInput = document.getElementById('gpuBridgeUrlInput');
+      const saveGpuBridgeBtn = document.getElementById('saveGpuBridgeBtn');
+      const disconnectGpuBtn = document.getElementById('disconnectGpuBtn');
+      const gpuStatusDot = document.getElementById('gpuStatusDot');
+      const gpuStatusLabel = document.getElementById('gpuStatusLabel');
+      const gpuFeedbackBox = document.getElementById('gpuFeedbackBox');
+
+      let savedGpuUrl = localStorage.getItem('studio_gpu_bridge_url') || '';
+      if (savedGpuUrl && gpuBridgeUrlInput) {
+        gpuBridgeUrlInput.value = savedGpuUrl;
+      }
+
+      async function verifyGpuConnection(url, notify = false) {
+        if (!url) {
+          gpuStatusDot.classList.remove('connected');
+          gpuStatusLabel.textContent = 'Conectar Motor GPU';
+          return false;
+        }
+        cleanUrl = url.replace(/\/+$/, '');
+        try {
+          if (notify && gpuFeedbackBox) {
+            gpuFeedbackBox.className = 'gpu-feedback-box';
+            gpuFeedbackBox.style.display = 'block';
+            gpuFeedbackBox.textContent = 'Testando conexão com a GPU NVIDIA...';
+          }
+          const res = await fetch(`${cleanUrl}/api/health`, { method: 'GET' });
+          if (res.ok) {
+            const data = await res.json();
+            gpuStatusDot.classList.add('connected');
+            gpuStatusLabel.textContent = '🟢 Motor GPU Ativo (NVIDIA T4)';
+            if (notify && gpuFeedbackBox) {
+              gpuFeedbackBox.className = 'gpu-feedback-box success';
+              gpuFeedbackBox.textContent = `Conectado com sucesso! ${data.engine || 'SadTalker + GFPGAN'}`;
+            }
+            return true;
+          }
+        } catch (err) {
+          console.warn('Falha no healthcheck do motor GPU:', err);
+        }
+        gpuStatusDot.classList.remove('connected');
+        gpuStatusLabel.textContent = 'Motor GPU Desconectado';
+        if (notify && gpuFeedbackBox) {
+          gpuFeedbackBox.className = 'gpu-feedback-box error';
+          gpuFeedbackBox.textContent = 'Não foi possível alcançar o motor GPU. Verifique se o notebook Colab está rodando.';
+        }
+        return false;
+      }
+
+      if (openGpuBridgeBtn) {
+        openGpuBridgeBtn.addEventListener('click', () => {
+          gpuModalOverlay.classList.add('active');
+          if (savedGpuUrl) verifyGpuConnection(savedGpuUrl, true);
+        });
+      }
+      if (closeGpuModalBtn) {
+        closeGpuModalBtn.addEventListener('click', () => {
+          gpuModalOverlay.classList.remove('active');
+        });
+      }
+      if (gpuModalOverlay) {
+        gpuModalOverlay.addEventListener('click', (e) => {
+          if (e.target === gpuModalOverlay) gpuModalOverlay.classList.remove('active');
+        });
+      }
+      if (saveGpuBridgeBtn) {
+        saveGpuBridgeBtn.addEventListener('click', async () => {
+          const rawUrl = gpuBridgeUrlInput.value.trim().replace(/\/+$/, '');
+          if (!rawUrl) {
+            alert('Por favor, informe a URL pública gerada no Google Colab.');
+            return;
+          }
+          saveGpuBridgeBtn.disabled = true;
+          saveGpuBridgeBtn.textContent = 'Verificando...';
+          const ok = await verifyGpuConnection(rawUrl, true);
+          saveGpuBridgeBtn.disabled = false;
+          saveGpuBridgeBtn.textContent = 'Salvar e Conectar';
+          if (ok) {
+            savedGpuUrl = rawUrl;
+            localStorage.setItem('studio_gpu_bridge_url', rawUrl);
+            setTimeout(() => {
+              gpuModalOverlay.classList.remove('active');
+            }, 1200);
+          }
+        });
+      }
+      if (disconnectGpuBtn) {
+        disconnectGpuBtn.addEventListener('click', () => {
+          localStorage.removeItem('studio_gpu_bridge_url');
+          savedGpuUrl = '';
+          gpuBridgeUrlInput.value = '';
+          gpuStatusDot.classList.remove('connected');
+          gpuStatusLabel.textContent = 'Conectar Motor GPU';
+          if (gpuFeedbackBox) {
+            gpuFeedbackBox.className = 'gpu-feedback-box';
+            gpuFeedbackBox.style.display = 'block';
+            gpuFeedbackBox.textContent = 'Motor GPU desconectado.';
+          }
+        });
+      }
+
+      // Verifica no carregamento da página
+      if (savedGpuUrl) {
+        verifyGpuConnection(savedGpuUrl, false);
+      }
 
       loadPresets();
       loadGallery();
