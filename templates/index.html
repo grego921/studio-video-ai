@@ -343,6 +343,60 @@
       position: relative;
     }
 
+    
+    /* Formato de Vídeo (TikTok / YouTube / Original) */
+    .format-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 8px;
+    }
+    @media (max-width: 600px) {
+      .format-grid { grid-template-columns: 1fr; }
+    }
+    .format-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px 10px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-align: center;
+      user-select: none;
+    }
+    .format-card input[type="radio"] {
+      display: none;
+    }
+    .format-card:hover {
+      background: rgba(99, 102, 241, 0.08);
+      border-color: rgba(99, 102, 241, 0.4);
+      transform: translateY(-2px);
+    }
+    .format-card.active {
+      background: rgba(99, 102, 241, 0.18);
+      border-color: #6366f1;
+      box-shadow: 0 0 16px rgba(99, 102, 241, 0.3);
+    }
+    .format-icon {
+      font-size: 26px;
+      margin-bottom: 6px;
+    }
+    .format-name {
+      font-weight: 700;
+      font-size: 0.88rem;
+      color: #fff;
+    }
+    .format-ratio {
+      font-size: 0.72rem;
+      color: var(--accent);
+      margin-top: 3px;
+      font-weight: 600;
+    }
+
     .preview-container img {
       max-width: 100%;
       max-height: 240px;
@@ -1178,7 +1232,7 @@
         <!-- 3. Trilha Sonora de Fundo -->
         <div class="wp-card">
           <div class="card-title-group">
-            <div class="card-step-badge">3</div>
+            <div class="card-step-badge">4</div>
             <div>
               <h2 class="card-title">Trilha Sonora / Fundo Musical</h2>
               <p class="card-desc">Música ambiente com mixagem automática suave</p>
@@ -1222,7 +1276,7 @@
         <!-- 4. Configuração de Tempo (Mínimo e Máximo) -->
         <div class="wp-card">
           <div class="card-title-group">
-            <div class="card-step-badge">4</div>
+            <div class="card-step-badge">5</div>
             <div>
               <h2 class="card-title">Controle de Duração do Vídeo</h2>
               <p class="card-desc">Defina o tempo mínimo e máximo em segundos</p>
@@ -1251,7 +1305,7 @@
         <!-- 5. Recursos de Animação e Sincronização -->
         <div class="wp-card">
           <div class="card-title-group">
-            <div class="card-step-badge">5</div>
+            <div class="card-step-badge">6</div>
             <div>
               <h2 class="card-title">Recursos de IA e Efeitos</h2>
               <p class="card-desc">Ative movimentos corporais, sincronia labial e identidade</p>
@@ -1443,6 +1497,16 @@
 
       enableMusicCheck.addEventListener('change', (e) => {
         musicOptionsBox.style.display = e.target.checked ? 'block' : 'none';
+      });
+
+      // Formato de Resolução
+      document.querySelectorAll('.format-card').forEach(card => {
+        card.addEventListener('click', () => {
+          document.querySelectorAll('.format-card').forEach(c => c.classList.remove('active'));
+          card.classList.add('active');
+          const r = card.querySelector('input[type="radio"]');
+          if (r) r.checked = true;
+        });
       });
 
       // Abas
@@ -1745,9 +1809,25 @@
           const neuralFormData = new FormData();
           if (imageInput.files[0]) {
             neuralFormData.append('image_file', imageInput.files[0]);
-          } else {
-            neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
+          } else if (imagePreviewEl && imagePreviewEl.src) {
+            try {
+              const resImg = await fetch(imagePreviewEl.src);
+              const blobImg = await resImg.blob();
+              neuralFormData.append('image_file', blobImg, 'face_input.jpg');
+            } catch(e) {
+              neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
+            }
           }
+
+          // Aspect Ratio (TikTok / YouTube / Original)
+          const selRatioEl = document.querySelector('.format-card.active');
+          const chosenRatio = selRatioEl ? selRatioEl.dataset.ratio : 'original';
+          neuralFormData.append('aspect_ratio', chosenRatio);
+
+          // Enquadramento: manter foto completa sem cortes de fundo nem zoom
+          const keepFullCheck = document.getElementById('keepFullImageCheck');
+          const keepFullVal = keepFullCheck ? keepFullCheck.checked : true;
+          neuralFormData.append('keep_full', keepFullVal ? 'true' : 'false');
 
           if (activeTab === 'tabText') {
             neuralFormData.append('script_text', scriptText);
@@ -1822,9 +1902,9 @@
             clearInterval(neuralProgressInterval);
             submitBtn.disabled = false;
             submitBtnText.textContent = 'Gerar Vídeo Agora';
+            if (progressBox) progressBox.style.display = 'none';
             console.error('Falha na renderização neural:', gpuErr);
-            alert('Aviso do Motor GPU: ' + gpuErr.message + '\n\nAlternando para prévia interativa...');
-            listenProgress('task_interactive');
+            alert('❌ Erro no Motor GPU: ' + gpuErr.message + '\n\nVerifique se o Google Colab está conectado e com a GPU T4 ligada.');
             return;
           }
         }
