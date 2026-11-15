@@ -32,10 +32,10 @@ current_task = {
 
 sample_gallery = [
   {
-    "filename": "video_ia_apresentacao_vertical.mp4",
+    "filename": "video_lider_maconico_falando.mp4",
     "url": "/static/sample_video.mp4",
     "download_url": "/static/sample_video.mp4",
-    "size_mb": 15.3,
+    "size_mb": 3.9,
     "created_at": "14/11/2026 15:33:31",
   }
 ]
@@ -124,7 +124,7 @@ def serve_video():
 def download_sample(filename):
     video_path = os.path.join(STATIC_DIR, "sample_video.mp4")
     if os.path.exists(video_path):
-        return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name="video_ia_finalizado.mp4")
+        return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name="video_lider_maconico_falando.mp4")
     return Response("Simulação de download concluída.", mimetype="text/plain")
 
 
