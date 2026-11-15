@@ -23,15 +23,25 @@ if SADTALKER_DIR not in sys.path:
     sys.path.insert(0, SADTALKER_DIR)
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 # 100 MB
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+
+@app.after_request
+def after_request(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept, Origin'
+    return response
 
 RESULTS_DIR = "/content/SadTalker/results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-@app.route('/', methods=['GET'])
-@app.route('/health', methods=['GET'])
-@app.route('/api/health', methods=['GET'])
+@app.route('/', methods=['GET', 'OPTIONS'])
+@app.route('/health', methods=['GET', 'OPTIONS'])
+@app.route('/api/health', methods=['GET', 'OPTIONS'])
 def health():
+    if request.method == 'OPTIONS':
+        return jsonify({"ready": True}), 200
     return jsonify({
         "status": "online",
         "ready": True,
@@ -92,8 +102,10 @@ async def synthesize_text_to_audio(text, voice, out_path):
         print(f"Erro no TTS edge_tts: {e}")
         return False
 
-@app.route('/api/generate_neural_video', methods=['POST'])
+@app.route('/api/generate_neural_video', methods=['POST', 'OPTIONS'])
 def generate_neural_video():
+    if request.method == 'OPTIONS':
+        return jsonify({"ready": True}), 200
     try:
         req_id = str(uuid.uuid4())[:8]
         work_dir = os.path.join(RESULTS_DIR, f"task_{req_id}")
