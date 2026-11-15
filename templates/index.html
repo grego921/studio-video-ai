@@ -1909,7 +1909,7 @@
           gpuStatusLabel.textContent = 'Conectar Motor GPU';
           return false;
         }
-        cleanUrl = url.replace(/\/+$/, '');
+        const cleanUrl = url.trim().replace(/[\/.]+$/, '');
         try {
           if (notify && gpuFeedbackBox) {
             gpuFeedbackBox.className = 'gpu-feedback-box';
@@ -1965,7 +1965,7 @@
       }
       if (saveGpuBridgeBtn) {
         saveGpuBridgeBtn.addEventListener('click', async () => {
-          const rawUrl = gpuBridgeUrlInput.value.trim().replace(/\/+$/, '');
+          const rawUrl = gpuBridgeUrlInput.value.trim().replace(/[\/.]+$/, '');
           if (!rawUrl) {
             alert('Por favor, informe a URL pública gerada no Google Colab.');
             return;

@@ -11,6 +11,7 @@ import json
 import base64
 import asyncio
 import traceback
+import shutil
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -130,13 +131,18 @@ def generate_neural_video():
         print(f"   Foto: {image_path}")
         print(f"   Áudio: {audio_path}")
 
+        temp_img = os.path.join(work_dir, "render_face" + os.path.splitext(image_path)[1])
+        shutil.copy2(image_path, temp_img)
+        temp_aud = os.path.join(work_dir, "render_audio" + os.path.splitext(audio_path)[1])
+        shutil.copy2(audio_path, temp_aud)
+
         st = get_sad_talker()
-        use_enhancer = request.form.get('use_enhancer', 'true').lower() in ('true', '1', 'yes')
+        use_enhancer = False # Desativado para usar modelo nativo 512px de alta fidelidade sem dependência de GFPGAN
         still_mode = request.form.get('still_mode', 'true').lower() in ('true', '1', 'yes')
 
         output_video_path = st.test(
-            source_image=image_path,
-            driven_audio=audio_path,
+            source_image=temp_img,
+            driven_audio=temp_aud,
             preprocess='crop',
             still_mode=still_mode,
             use_enhancer=use_enhancer,
