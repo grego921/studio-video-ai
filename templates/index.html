@@ -1378,7 +1378,7 @@
         }
 
         // Link direto de download
-        downloadResultLink.href = `/api/download/${encodeURIComponent(filename)}`;
+        downloadResultLink.href = url;
         downloadResultLink.setAttribute('download', filename);
 
         // Toca o vídeo suavemente (com mute defensivo se bloqueado por autoplay de navegadores)
