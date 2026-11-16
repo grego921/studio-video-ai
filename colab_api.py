@@ -22,6 +22,37 @@ SADTALKER_DIR = os.path.abspath("/content/SadTalker")
 if SADTALKER_DIR not in sys.path:
     sys.path.insert(0, SADTALKER_DIR)
 
+def patch_paste_pic():
+    """Garante que as coordenadas em paste_pic.py sejam 100% inteiras para evitar erros de OpenCV."""
+    paste_file = os.path.join(SADTALKER_DIR, "src/utils/paste_pic.py")
+    if os.path.exists(paste_file):
+        try:
+            with open(paste_file, "r") as f:
+                p_code = f.read()
+            p_code = p_code.replace(
+                "clx, cly, crx, cry = crop_info[1]",
+                "clx, cly, crx, cry = [int(float(v)) for v in crop_info[1]]"
+            )
+            p_code = p_code.replace(
+                "lx, ly, rx, ry = crop_info[2]",
+                "lx, ly, rx, ry = [int(float(v)) for v in crop_info[2]]"
+            )
+            p_code = p_code.replace(
+                "location = ((ox1+ox2) // 2, (oy1+oy2) // 2)",
+                "location = (int((ox1+ox2) // 2), int((oy1+oy2) // 2))"
+            )
+            p_code = p_code.replace(
+                "p = cv2.resize(crop_frame.astype(np.uint8), (ox2-ox1, oy2 - oy1))",
+                "p = cv2.resize(crop_frame.astype(np.uint8), (int(ox2-ox1), int(oy2 - oy1)))"
+            )
+            with open(paste_file, "w") as f:
+                f.write(p_code)
+            print("✅ paste_pic.py verificado com coordenadas inteiras!")
+        except Exception as e:
+            print("Aviso ao corrigir paste_pic.py:", e)
+
+patch_paste_pic()
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 # 100 MB
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
@@ -47,7 +78,7 @@ def health():
         "ready": True,
         "gpu": "NVIDIA T4 15GB (Google Colab)",
         "engine": "SadTalker Full-Frame 512px (TikTok / YouTube)",
-        "bridge": "Studio Video AI Cloud Bridge v3.0"
+        "bridge": "Studio Video AI Cloud Bridge v3.5"
     })
 
 def prepare_image_aspect_ratio(img_path, target_ratio='original'):
@@ -120,7 +151,6 @@ def generate_neural_video():
             print(f"📸 Imagem recebida com sucesso: {f.filename} ({os.path.getsize(image_path)} bytes)")
         elif request.form.get('selected_image'):
             sel = request.form.get('selected_image')
-            # Se for um nome conhecido ou caminho
             candidates = [
                 sel,
                 os.path.join("/content", os.path.basename(sel)),
@@ -202,30 +232,52 @@ def generate_neural_video():
 
         still_mode = request.form.get('still_mode', 'true').lower() in ('true', '1', 'yes')
 
-        output_video_path = st.test(
-            source_image=temp_img,
-            driven_audio=temp_aud,
-            preprocess=preprocess_mode,
-            still_mode=still_mode,
-            use_enhancer=False,
-            batch_size=2,
-            size=512,
-            result_dir=work_dir
-        )
+        output_video_path = None
+        try:
+            output_video_path = st.test(
+                source_image=temp_img,
+                driven_audio=temp_aud,
+                preprocess=preprocess_mode,
+                still_mode=still_mode,
+                use_enhancer=False,
+                batch_size=2,
+                size=512,
+                result_dir=work_dir
+            )
+        except Exception as full_err:
+            print(f"⚠️ Aviso no modo {preprocess_mode}: {full_err}")
+            if preprocess_mode != 'crop':
+                print("🔄 Tentando modo de segurança 'crop'...")
+                # Recria instância para o retry
+                st_fallback = SadTalker(
+                    checkpoint_path='/content/SadTalker/checkpoints',
+                    config_path='/content/SadTalker/src/config',
+                    lazy_load=True
+                )
+                output_video_path = st_fallback.test(
+                    source_image=temp_img,
+                    driven_audio=temp_aud,
+                    preprocess='crop',
+                    still_mode=still_mode,
+                    use_enhancer=False,
+                    batch_size=2,
+                    size=512,
+                    result_dir=work_dir
+                )
+            else:
+                raise full_err
 
         # Busca pelo vídeo gerado no diretório
         final_video = None
         if output_video_path and os.path.exists(output_video_path):
             final_video = output_video_path
         else:
-            # Procura qualquer mp4 gerado, priorizando arquivos com '_full.mp4' se preprocess='full'
             candidates_mp4 = []
             for root, dirs, files in os.walk(work_dir):
                 for file in files:
                     if file.endswith('.mp4'):
                         candidates_mp4.append(os.path.join(root, file))
             if candidates_mp4:
-                # Se tem _full.mp4, prefere ele
                 full_matches = [c for c in candidates_mp4 if '_full.mp4' in c]
                 final_video = full_matches[0] if full_matches else candidates_mp4[-1]
 
@@ -264,5 +316,5 @@ def download_video(task_id, filename):
 
 if __name__ == '__main__':
     port = 7860
-    print(f"🚀 Iniciando Studio Video AI GPU Bridge v3.0 na porta {port}...")
+    print(f"🚀 Iniciando Studio Video AI GPU Bridge v3.5 na porta {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)

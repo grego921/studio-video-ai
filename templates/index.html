@@ -1640,19 +1640,58 @@
       }
 
       // Galeria
+            // Helpers para persistir galeria localmente
+      function getLocalGalleryVideos() {
+        try {
+          return JSON.parse(localStorage.getItem('studio_ai_saved_videos') || '[]');
+        } catch(e) {
+          return [];
+        }
+      }
+
+      function saveVideoToLocalGallery(videoObj) {
+        try {
+          let saved = getLocalGalleryVideos();
+          // Não salva strings base64 gigantes no localStorage para não estourar a cota de 5MB
+          const safeObj = { ...videoObj };
+          if (safeObj.url && safeObj.url.length > 300000) {
+            safeObj.url = safeObj.httpUrl || safeObj.url;
+          }
+          saved = saved.filter(v => v.filename !== videoObj.filename);
+          saved.unshift(safeObj);
+          localStorage.setItem('studio_ai_saved_videos', JSON.stringify(saved.slice(0, 20)));
+        } catch(e) {
+          console.warn('Erro ao salvar no localStorage:', e);
+        }
+      }
+
       async function loadGallery() {
         try {
-          const res = await fetch('/api/gallery');
-          const videos = await res.json();
-          galleryCountLabel.textContent = `${videos.length} vídeo${videos.length !== 1 ? 's' : ''} pronto${videos.length !== 1 ? 's' : ''}`;
+          let serverVideos = [];
+          try {
+            const res = await fetch('/api/gallery');
+            if (res.ok) serverVideos = await res.json();
+          } catch(e) {}
 
-          if (videos.length === 0) {
+          const localVideos = getLocalGalleryVideos();
+          const allVideos = [...localVideos];
+          for (const sv of serverVideos) {
+            if (!allVideos.some(v => v.filename === sv.filename || v.url === sv.url)) {
+              allVideos.push(sv);
+            }
+          }
+
+          if (galleryCountLabel) {
+            galleryCountLabel.textContent = `${allVideos.length} vídeo${allVideos.length !== 1 ? 's' : ''} pronto${allVideos.length !== 1 ? 's' : ''}`;
+          }
+
+          if (allVideos.length === 0) {
             galleryGridEl.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 24px; color: var(--text-subtle); font-size: 0.85rem;">Nenhum vídeo gerado ainda. Crie o primeiro ao lado!</div>';
             return;
           }
 
           galleryGridEl.innerHTML = '';
-          videos.forEach(v => {
+          allVideos.forEach(v => {
             const card = document.createElement('div');
             card.className = 'gallery-item-card';
             card.innerHTML = `
@@ -1662,8 +1701,8 @@
               </div>
               <div class="gallery-info-box">
                 <div class="gallery-filename" title="${v.filename}">${v.filename}</div>
-                <div class="gallery-subtext"><span>${v.created_at}</span><span>${v.size_mb} MB</span></div>
-                <a href="${v.download_url}" download class="gallery-btn-dl">Baixar MP4</a>
+                <div class="gallery-subtext"><span>${v.created_at || 'Recente'}</span><span>${v.size_mb || 3.5} MB</span></div>
+                <a href="${v.url}" download="${v.filename}" class="gallery-btn-dl">Baixar MP4</a>
               </div>
             `;
             card.querySelector('.gallery-thumb').addEventListener('click', () => {
@@ -1672,12 +1711,13 @@
             galleryGridEl.appendChild(card);
           });
         } catch (e) {
-          console.warn('Erro galeria:', e);
+          console.warn('Erro ao carregar galeria:', e);
         }
       }
 
       function showResult(url, filename) {
         resultCard.classList.remove('hidden');
+        resultCard.style.display = 'block';
         
         // Atribui URL local do vídeo (permitida por CSP)
         resultVideoPlayer.src = url;
@@ -1887,10 +1927,12 @@
           neuralFormData.append('still_mode', 'true');
 
           const stages = [
-            { pct: 25, msg: '1/4 Sintetizando áudio neural com sincronia...' },
-            { pct: 50, msg: '2/4 Mapeando malha 3D e pontos faciais do personagem...' },
-            { pct: 75, msg: '3/4 Renderizando movimentos de boca e cabeça com IA...' },
-            { pct: 90, msg: '4/4 Aplicando aprimoramento facial HD (GFPGAN)...' }
+            { pct: 20, msg: '1/5 Sintetizando voz e sincronia de áudio...' },
+            { pct: 40, msg: '2/5 Mapeando malha 3D e pontos faciais do personagem...' },
+            { pct: 65, msg: '3/5 Renderizando movimentos de cabeça e fala em 3D...' },
+            { pct: 85, msg: '4/5 Superplaca NVIDIA T4 desenhando quadros neurais...' },
+            { pct: 92, msg: '5/5 Finalizando codificação e áudio do vídeo...' },
+            { pct: 96, msg: 'Quase pronto! Recebendo vídeo da superplaca...' }
           ];
           let sIdx = 0;
 
@@ -1927,7 +1969,7 @@
             if (data.success) {
               progressBarFillEl.style.width = '100%';
               progressPctLabel.textContent = '100%';
-              progressStatusMsg.textContent = 'Vídeo 3D gerado com sucesso pelo Motor GPU!';
+              progressStatusMsg.textContent = '🎉 Vídeo 3D gerado com sucesso pelo Motor GPU!';
               updateSteps(100);
 
               if (spinEl) spinEl.style.display = 'none';
@@ -1936,12 +1978,61 @@
               }
 
               const videoFinalUrl = data.video_base64 || `${cleanGpuUrl}${data.video_url}`;
+              const outFilename = data.filename || 'video_neural_ia.mp4';
+
               setTimeout(() => {
                 submitBtn.disabled = false;
                 submitBtnText.textContent = '✨ Gerar Outro Vídeo';
-                showResult(videoFinalUrl, data.filename || 'video_neural_ia.mp4');
-                loadGallery();
-              }, 600);
+
+                // 1. Exibe player principal
+                showResult(videoFinalUrl, outFilename);
+
+                // 2. Adiciona item imediatamente no topo da galeria visual
+                const grid = document.getElementById('galleryGridEl');
+                if (grid) {
+                  if (grid.innerHTML.includes('Nenhum vídeo') || grid.innerHTML.includes('Crie o primeiro')) {
+                    grid.innerHTML = '';
+                  }
+                  const card = document.createElement('div');
+                  card.className = 'gallery-item-card';
+                  card.innerHTML = `
+                    <div class="gallery-thumb" title="Clique para assistir">
+                      <video preload="metadata" src="${videoFinalUrl}#t=0.5"></video>
+                      <div class="gallery-play-btn"><svg class="icon-sm" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>
+                    </div>
+                    <div class="gallery-info-box">
+                      <div class="gallery-filename" title="${outFilename}">${outFilename}</div>
+                      <div class="gallery-subtext"><span>Agora mesmo</span><span>HD Neural</span></div>
+                      <a href="${videoFinalUrl}" download="${outFilename}" class="gallery-btn-dl">Baixar MP4</a>
+                    </div>
+                  `;
+                  card.querySelector('.gallery-thumb').addEventListener('click', () => {
+                    showResult(videoFinalUrl, outFilename);
+                  });
+                  grid.prepend(card);
+                  saveVideoToLocalGallery({
+                    url: videoFinalUrl,
+                    httpUrl: `${cleanGpuUrl}${data.video_url || ''}`,
+                    filename: outFilename,
+                    created_at: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+                    size_mb: data.size_mb || 3.5
+                  });
+                }
+
+                const countLbl = document.getElementById('galleryCountLabel');
+                if (countLbl) {
+                  const currentCount = document.querySelectorAll('.gallery-item-card').length;
+                  countLbl.textContent = `${currentCount} vídeo${currentCount !== 1 ? 's' : ''} pronto${currentCount !== 1 ? 's' : ''}`;
+                }
+
+                // Rola suavemente até o vídeo pronto
+                const resCard = document.getElementById('resultCard');
+                if (resCard) {
+                  resCard.classList.remove('hidden');
+                  resCard.style.display = 'block';
+                  resCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+              }, 400);
               return;
             } else {
               throw new Error(data.error || 'Falha no processamento');
