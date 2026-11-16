@@ -1,5 +1,5 @@
 """
-Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.0 (High-Speed Engine)
+Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.1 (Verified Engine)
 Executa o SadTalker em processo OS isolado com pesos 100% pré-carregados e telemetria em tempo real.
 """
 
@@ -13,8 +13,14 @@ import shutil
 import threading
 import subprocess
 from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
 from PIL import Image
+
+# Import opcional de CORS com fallback seguro via after_request
+try:
+    from flask_cors import CORS
+    HAS_CORS = True
+except Exception:
+    HAS_CORS = False
 
 SADTALKER_DIR = os.path.abspath("/content/SadTalker")
 if SADTALKER_DIR not in sys.path:
@@ -55,7 +61,11 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+if HAS_CORS:
+    try:
+        CORS(app)
+    except Exception:
+        pass
 
 TASKS = {}
 
@@ -74,8 +84,8 @@ def health():
         "status": "online",
         "ready": True,
         "gpu": "NVIDIA T4 15GB (Google Colab)",
-        "engine": "SadTalker Full-Frame 512px (High-Speed Engine v7.0)",
-        "bridge": "Studio Video AI Cloud Bridge v7.0"
+        "engine": "SadTalker Full-Frame 512px (High-Speed Engine v7.1)",
+        "bridge": "Studio Video AI Cloud Bridge v7.1"
     })
 
 @app.route('/api/logs', methods=['GET'])
@@ -369,5 +379,5 @@ def download_video(task_id, filename):
 
 if __name__ == '__main__':
     port = 7860
-    print(f"🚀 Iniciando Studio Video AI GPU Bridge v7.0 (High-Speed Engine) na porta {port}...")
+    print(f"🚀 Iniciando Studio Video AI GPU Bridge v7.1 na porta {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
