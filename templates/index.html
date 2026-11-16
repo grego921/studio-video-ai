@@ -1952,7 +1952,7 @@
             submitBtnText.textContent = 'Gerar Vídeo Agora';
             if (progressBox) progressBox.style.display = 'none';
             console.error('Falha na renderização neural:', gpuErr);
-            alert('❌ Erro no Motor GPU: ' + gpuErr.message + '\n\nVerifique se o Google Colab está conectado e com a GPU T4 ligada.');
+            alert('❌ Erro no Motor GPU (' + gpuErr.message + '):\n\nURL tentada: ' + cleanGpuUrl + '\n\nCertifique-se de que copiou o link que está ativo NESTE MOMENTO no Google Colab.');
             return;
           }
         }
