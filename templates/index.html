@@ -1229,7 +1229,55 @@
           </div>
         </div>
 
-        <!-- 3. Trilha Sonora de Fundo -->
+                <!-- 3. Formato de Resolução e Enquadramento -->
+        <div class="wp-card">
+          <div class="card-title-group">
+            <div class="card-step-badge">3</div>
+            <div>
+              <h2 class="card-title">Resolução e Enquadramento</h2>
+              <p class="card-desc">Escolha a proporção para redes sociais e mantenha a imagem completa sem cortes</p>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Selecione o Formato do Vídeo:</label>
+            <div class="format-grid" id="formatGrid">
+              <label class="format-card active" data-ratio="tiktok">
+                <input type="radio" name="aspectRatio" value="tiktok" checked>
+                <div class="format-icon">📱</div>
+                <div class="format-name">TikTok / Reels / Shorts</div>
+                <div class="format-ratio">Vertical (9:16)</div>
+              </label>
+
+              <label class="format-card" data-ratio="youtube">
+                <input type="radio" name="aspectRatio" value="youtube">
+                <div class="format-icon">📺</div>
+                <div class="format-name">YouTube / Feed</div>
+                <div class="format-ratio">Horizontal (16:9)</div>
+              </label>
+
+              <label class="format-card" data-ratio="original">
+                <input type="radio" name="aspectRatio" value="original">
+                <div class="format-icon">🖼️</div>
+                <div class="format-name">Original da Imagem</div>
+                <div class="format-ratio">Sem alteração</div>
+              </label>
+            </div>
+          </div>
+
+          <div class="toggle-item" style="margin-top: 16px; background: rgba(99, 102, 241, 0.06); border: 1px solid rgba(99, 102, 241, 0.2); border-radius: 8px; padding: 12px 14px;">
+            <div class="toggle-meta">
+              <strong style="color: #a5b4fc;">🌟 Manter Foto Completa (Com Fundo, Roupas e Cenário)</strong>
+              <span>Anima o personagem dando vida à imagem exata que você enviou, sem cortar o fundo e sem dar zoom no rosto</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="keepFullImageCheck" checked>
+              <span class="slider-round"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 4. Trilha Sonora de Fundo -->
         <div class="wp-card">
           <div class="card-title-group">
             <div class="card-step-badge">4</div>
