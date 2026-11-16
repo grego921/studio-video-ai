@@ -58,45 +58,36 @@ def system_info():
     is_vercel = bool(os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
     return jsonify({
         "is_vercel": is_vercel,
-        "environment": "Vercel Cloud Serverless" if is_vercel else "Local PC",
-        "engine": "Open Source Video AI (C:\\Open sorce geração de vídeos)"
+        "gpu_available": False,
+        "engine": "SadTalker Full-Frame 512px (Modo GPU Colab)" if is_vercel else "Modo Web SaaS Local",
+        "version": "v2.5"
     })
-
-@app.route('/api/status')
-def get_status():
-    return jsonify(current_task)
-
-@app.route('/api/progress-stream')
-def progress_stream():
-    def event_stream():
-        for p, msg in [
-            (15, "Sintetizando voz neural de alta fidelidade..."),
-            (35, "Extraindo fonemas acústicos para sincronia labial..."),
-            (60, "Renderizando animação facial e movimento corporal..."),
-            (85, "Mixando trilha sonora e aplicando identidade visual..."),
-            (100, "Vídeo finalizado com sucesso!")
-        ]:
-            time.sleep(1.0)
-            data = {
-                "progress": p,
-                "message": msg,
-                "status": "completed" if p == 100 else "processing",
-                "video_url": "/static/sample_video.mp4" if p == 100 else None,
-                "filename": f"video_ia_{int(time.time())}.mp4"
-            }
-            yield f"data: {json.dumps(data)}\n\n"
-    return Response(event_stream(), mimetype="text/event-stream")
 
 @app.route('/api/assets')
 def list_assets():
     return jsonify({
         "images": [
-            {"name": "avatar_personagem_ia.png", "path": "elementos/avatar.png", "folder": "elementos"}
+            {"name": "personagem_maconaria.jpg", "path": "personagem_maconaria.jpg", "folder": "padrao"}
         ],
         "musics": [
-            {"name": "trilha_sonora_oficial.mp3", "path": "elementos/trilha.mp3"}
+            {"name": "fala_maconica.mp3", "path": "fala_maconica.mp3"}
         ]
     })
+
+@app.route('/api/asset-file/<path:filepath>')
+def get_asset_file(filepath):
+    basename = os.path.basename(filepath)
+    candidates = [
+        os.path.join(STATIC_DIR, basename),
+        os.path.join(ROOT_DIR, basename),
+        os.path.join(STATIC_DIR, "personagem_maconaria.jpg"),
+        os.path.join(ROOT_DIR, "personagem_maconaria.jpg")
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            mimetype = "image/jpeg" if c.endswith(('.jpg', '.jpeg')) else ("audio/mpeg" if c.endswith('.mp3') else "application/octet-stream")
+            return send_file(c, mimetype=mimetype)
+    return "Asset não encontrado", 404
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
@@ -115,7 +106,6 @@ def generate():
 def gallery():
     return jsonify(sample_gallery)
 
-
 @app.route('/static/sample_video.mp4')
 @app.route('/api/video/latest.mp4')
 def serve_video():
@@ -130,7 +120,6 @@ def download_sample(filename):
     if os.path.exists(video_path):
         return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name="video_lider_maconico_falando.mp4")
     return Response("Simulação de download concluída.", mimetype="text/plain")
-
 
 if __name__ == '__main__':
     port = 5000

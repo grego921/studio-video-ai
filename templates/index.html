@@ -1897,14 +1897,24 @@
           const neuralFormData = new FormData();
           if (imageInput.files[0]) {
             neuralFormData.append('image_file', imageInput.files[0]);
-          } else if (imagePreviewEl && imagePreviewEl.src) {
+          } else if (imagePreviewEl && imagePreviewEl.src && !imagePreviewEl.src.endsWith('#')) {
             try {
               const resImg = await fetch(imagePreviewEl.src);
-              const blobImg = await resImg.blob();
-              neuralFormData.append('image_file', blobImg, 'face_input.jpg');
+              if (resImg.ok) {
+                const blobImg = await resImg.blob();
+                if (blobImg.type.startsWith('image/') && blobImg.size > 1000) {
+                  neuralFormData.append('image_file', blobImg, 'face_input.jpg');
+                } else {
+                  neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
+                }
+              } else {
+                neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
+              }
             } catch(e) {
               neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
             }
+          } else {
+            neuralFormData.append('selected_image', selectedImagePath || 'personagem_maconaria.jpg');
           }
 
           // Aspect Ratio (TikTok / YouTube / Original)
@@ -2041,9 +2051,12 @@
             clearInterval(neuralProgressInterval);
             submitBtn.disabled = false;
             submitBtnText.textContent = 'Gerar Vídeo Agora';
-            if (progressBox) progressBox.style.display = 'none';
+            progressBarFillEl.style.width = '100%';
+            progressBarFillEl.style.background = '#ef4444';
+            progressPctLabel.textContent = 'Erro';
+            progressStatusMsg.innerHTML = `<span style="color:#ef4444; font-weight:700;">❌ Falha na GPU: ${gpuErr.message}</span>`;
             console.error('Falha na renderização neural:', gpuErr);
-            alert('❌ Erro no Motor GPU (' + gpuErr.message + '):\n\nURL tentada: ' + cleanGpuUrl + '\n\nCertifique-se de que copiou o link que está ativo NESTE MOMENTO no Google Colab.');
+            alert('❌ Erro no Motor GPU (' + gpuErr.message + '):\n\nURL tentada: ' + cleanGpuUrl + '\n\nCertifique-se de que o Google Colab está ativo com a GPU T4 ligada e com o link correto.');
             return;
           }
         }
