@@ -2008,12 +2008,12 @@
               loadGallery();
             };
 
-            // Se o servidor for assíncrono (v5.0): faz polling a cada 3s para evitar timeout do Cloudflare
+            // Se o servidor for assíncrono (v7.0): faz polling a cada 3s com telemetria em tempo real
             if (initData.async && initData.task_id) {
               const taskId = initData.task_id;
               let isDone = false;
               let attempts = 0;
-              const maxAttempts = 150; // até 7.5 minutos
+              const maxAttempts = 300; // até 15 minutos de tolerância para vídeos longos
 
               while (!isDone && attempts < maxAttempts) {
                 await new Promise(r => setTimeout(r, 3000));
@@ -2024,6 +2024,7 @@
                   pollRes = await fetch(`${cleanGpuUrl}/api/task_status/${taskId}`);
                 } catch(e) {
                   console.warn('Polling temporariamente indisponível:', e);
+                  progressStatusMsg.innerHTML = '<span style="color:#fbbf24;">Aguardando resposta da GPU...</span>';
                   continue;
                 }
 
@@ -2032,7 +2033,7 @@
                 const taskState = await pollRes.json();
                 if (taskState.status === 'processing') {
                   if (taskState.message) {
-                    progressStatusMsg.textContent = taskState.message;
+                    progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ ${taskState.message}</span>`;
                   }
                 } else if (taskState.status === 'completed') {
                   isDone = true;

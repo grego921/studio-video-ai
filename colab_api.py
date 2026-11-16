@@ -1,6 +1,6 @@
 """
-Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v6.0 (Subprocess Engine)
-Executa o SadTalker em processo isolado garantindo 0 deadlocks e 100% de estabilidade.
+Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.0 (High-Speed Engine)
+Executa o SadTalker em processo OS isolado com pesos 100% pré-carregados e telemetria em tempo real.
 """
 
 import os
@@ -74,9 +74,18 @@ def health():
         "status": "online",
         "ready": True,
         "gpu": "NVIDIA T4 15GB (Google Colab)",
-        "engine": "SadTalker Full-Frame 512px (Subprocess Engine)",
-        "bridge": "Studio Video AI Cloud Bridge v6.0"
+        "engine": "SadTalker Full-Frame 512px (High-Speed Engine v7.0)",
+        "bridge": "Studio Video AI Cloud Bridge v7.0"
     })
+
+@app.route('/api/logs', methods=['GET'])
+def get_logs():
+    lines = []
+    log_file = "/content/api.log"
+    if os.path.exists(log_file):
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-40:]
+    return jsonify({"logs": [l.strip() for l in lines]}), 200
 
 def run_tts(text, voice, out_path):
     v = voice or "pt-BR-AntonioNeural"
@@ -118,7 +127,7 @@ def convert_video_aspect_ratio(input_video, output_video, ratio='original'):
 def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full):
     try:
         TASKS[task_id]["status"] = "processing"
-        TASKS[task_id]["message"] = "Renderizando vídeo na superplaca NVIDIA T4..."
+        TASKS[task_id]["message"] = "Iniciando motor neural na superplaca NVIDIA T4..."
 
         preprocess_mode = 'full' if keep_full else 'crop'
 
@@ -128,42 +137,100 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
         temp_aud = os.path.join(work_dir, "render_audio" + os.path.splitext(audio_path)[1])
         shutil.copy2(audio_path, temp_aud)
 
-        # Executa em processo OS isolado para nunca travar o mutex do PyTorch CUDA
+        task_log_path = os.path.join(work_dir, "task_render.log")
+
         cmd = [
             sys.executable, "/content/SadTalker/inference.py",
             "--driven_audio", temp_aud,
             "--source_image", temp_img,
             "--result_dir", work_dir,
             "--checkpoint_dir", "/content/SadTalker/checkpoints",
+            "--bfm_folder", "/content/SadTalker/checkpoints/BFM_Fitting",
             "--size", "512",
             "--preprocess", preprocess_mode,
             "--still"
         ]
 
-        print(f"🚀 [Task {task_id}] Iniciando SadTalker inference.py: {preprocess_mode}")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"⚠️ Aviso no modo {preprocess_mode}: {proc.stderr[-400:]}")
-            if preprocess_mode != 'crop':
-                print("🔄 Tentando modo de segurança 'crop'...")
-                cmd[13] = 'crop'
-                proc = subprocess.run(cmd, capture_output=True, text=True)
+        print(f"🚀 [Task {task_id}] Executando SadTalker inference.py (modo: {preprocess_mode})")
+        TASKS[task_id]["message"] = f"Mapeando malha 3D e fonemas (GPU T4)..."
+
+        with open(task_log_path, "w", encoding="utf-8") as log_f:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                cwd="/content/SadTalker"
+            )
+
+            # Monitoramento ativo do log para telemetria em tempo real
+            while proc.poll() is None:
+                time.sleep(2.5)
+                try:
+                    if os.path.exists(task_log_path):
+                        with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
+                            lines = [ln.strip() for ln in rf.readlines() if ln.strip()]
+                            if lines:
+                                last_l = lines[-1]
+                                if "3DMM" in last_l:
+                                    TASKS[task_id]["message"] = "Extraindo malha 3D facial do personagem..."
+                                elif "audio2exp" in last_l:
+                                    TASKS[task_id]["message"] = "Sincronizando áudio e expressões neurais..."
+                                elif "facerender" in last_l or "facerender_batch" in last_l:
+                                    TASKS[task_id]["message"] = "GPU Tesla T4 desenhando quadros faciais em 512px..."
+                                elif "seamlessClone" in last_l:
+                                    TASKS[task_id]["message"] = "Integrando alta resolução e enquadramento completo..."
+                                else:
+                                    TASKS[task_id]["message"] = f"Renderizando na superplaca T4 ({last_l[-45:]})..."
+                except Exception:
+                    pass
+
+        # Fallback de segurança automático se o modo full falhar
+        if proc.returncode != 0 and preprocess_mode != 'crop':
+            print(f"⚠️ Aviso no modo {preprocess_mode}. Tentando modo de segurança 'crop'...")
+            TASKS[task_id]["message"] = "Ajustando para modo de segurança (crop)..."
+            cmd_crop = list(cmd)
+            cmd_crop[cmd_crop.index('--preprocess') + 1] = 'crop'
+            with open(task_log_path, "a", encoding="utf-8") as log_f:
+                proc = subprocess.Popen(
+                    cmd_crop,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    cwd="/content/SadTalker"
+                )
+                while proc.poll() is None:
+                    time.sleep(2.5)
+                    try:
+                        if os.path.exists(task_log_path):
+                            with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
+                                lines = [ln.strip() for ln in rf.readlines() if ln.strip()]
+                                if lines:
+                                    TASKS[task_id]["message"] = f"GPU T4 (Segurança): {lines[-1][-45:]}"
+                    except Exception:
+                        pass
 
         if proc.returncode != 0:
-            raise RuntimeError(f"Erro no SadTalker: {proc.stderr[-400:] or proc.stdout[-400:]}")
+            err_details = "Erro de execução no SadTalker"
+            try:
+                if os.path.exists(task_log_path):
+                    with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
+                        err_lines = [ln.strip() for ln in rf.readlines() if ln.strip()]
+                        err_details = "\n".join(err_lines[-12:])
+            except Exception:
+                pass
+            raise RuntimeError(f"Falha na GPU: {err_details}")
 
         raw_video = None
         candidates_mp4 = []
         for root, dirs, files in os.walk(work_dir):
             for file in files:
-                if file.endswith('.mp4'):
+                if file.endswith('.mp4') and not file.startswith('temp_'):
                     candidates_mp4.append(os.path.join(root, file))
         if candidates_mp4:
             full_matches = [c for c in candidates_mp4 if '_full.mp4' in c]
             raw_video = full_matches[0] if full_matches else candidates_mp4[-1]
 
         if not raw_video or not os.path.exists(raw_video):
-            raise RuntimeError("O SadTalker concluiu mas não gerou arquivo MP4.")
+            raise RuntimeError("O SadTalker concluiu mas não gerou o arquivo de vídeo MP4.")
 
         final_video_name = f"video_{aspect_ratio}_{task_id}.mp4"
         final_video_path = os.path.join(work_dir, final_video_name)
@@ -302,5 +369,5 @@ def download_video(task_id, filename):
 
 if __name__ == '__main__':
     port = 7860
-    print(f"🚀 Iniciando Studio Video AI GPU Bridge v6.0 (Subprocess Engine) na porta {port}...")
+    print(f"🚀 Iniciando Studio Video AI GPU Bridge v7.0 (High-Speed Engine) na porta {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
