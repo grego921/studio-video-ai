@@ -47,6 +47,10 @@ sample_gallery = [
 def index():
     if request.method == 'POST':
         return generate()
+    template_path = os.path.join(TEMPLATE_DIR, "index.html")
+    if os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            return Response(f.read(), mimetype="text/html")
     return Response(HTML_PAGE, mimetype="text/html")
 
 @app.route('/api/system-info')
