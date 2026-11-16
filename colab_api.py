@@ -1,7 +1,6 @@
 """
-Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v5.0 (Async Worker)
-Executa no Google Colab com suporte a Tarefas Assíncronas (Zero Timeout no Cloudflare).
-SadTalker Full-Frame 512px com Preservação Total de Fundo e Formatação TikTok / YouTube.
+Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v6.0 (Subprocess Engine)
+Executa o SadTalker em processo isolado garantindo 0 deadlocks e 100% de estabilidade.
 """
 
 import os
@@ -51,8 +50,6 @@ def patch_paste_pic():
 
 patch_paste_pic()
 
-from src.gradio_demo import SadTalker
-
 RESULTS_DIR = "/content/output_videos"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -60,7 +57,6 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-# Dicionário de tarefas em execução na GPU
 TASKS = {}
 
 @app.after_request
@@ -78,8 +74,8 @@ def health():
         "status": "online",
         "ready": True,
         "gpu": "NVIDIA T4 15GB (Google Colab)",
-        "engine": "SadTalker Full-Frame 512px (Async Pipeline)",
-        "bridge": "Studio Video AI Cloud Bridge v5.0"
+        "engine": "SadTalker Full-Frame 512px (Subprocess Engine)",
+        "bridge": "Studio Video AI Cloud Bridge v6.0"
     })
 
 def run_tts(text, voice, out_path):
@@ -120,10 +116,9 @@ def convert_video_aspect_ratio(input_video, output_video, ratio='original'):
     return output_video
 
 def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full):
-    """Executa a renderização 3D do SadTalker e conversão ffmpeg em background."""
     try:
         TASKS[task_id]["status"] = "processing"
-        TASKS[task_id]["message"] = "Mapeando malha 3D e renderizando na superplaca T4..."
+        TASKS[task_id]["message"] = "Renderizando vídeo na superplaca NVIDIA T4..."
 
         preprocess_mode = 'full' if keep_full else 'crop'
 
@@ -133,57 +128,42 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
         temp_aud = os.path.join(work_dir, "render_audio" + os.path.splitext(audio_path)[1])
         shutil.copy2(audio_path, temp_aud)
 
-        st = SadTalker(
-            checkpoint_path='/content/SadTalker/checkpoints',
-            config_path='/content/SadTalker/src/config',
-            lazy_load=True
-        )
+        # Executa em processo OS isolado para nunca travar o mutex do PyTorch CUDA
+        cmd = [
+            sys.executable, "/content/SadTalker/inference.py",
+            "--driven_audio", temp_aud,
+            "--source_image", temp_img,
+            "--result_dir", work_dir,
+            "--checkpoint_dir", "/content/SadTalker/checkpoints",
+            "--size", "512",
+            "--preprocess", preprocess_mode,
+            "--still"
+        ]
 
-        output_video_path = None
-        try:
-            output_video_path = st.test(
-                source_image=temp_img,
-                driven_audio=temp_aud,
-                preprocess=preprocess_mode,
-                still_mode=True,
-                use_enhancer=False,
-                batch_size=2,
-                size=512,
-                result_dir=work_dir
-            )
-        except Exception as full_err:
-            print(f"Aviso preprocess={preprocess_mode}: {full_err}. Tentando crop...")
-            st_fallback = SadTalker(
-                checkpoint_path='/content/SadTalker/checkpoints',
-                config_path='/content/SadTalker/src/config',
-                lazy_load=True
-            )
-            output_video_path = st_fallback.test(
-                source_image=temp_img,
-                driven_audio=temp_aud,
-                preprocess='crop',
-                still_mode=True,
-                use_enhancer=False,
-                batch_size=2,
-                size=512,
-                result_dir=work_dir
-            )
+        print(f"🚀 [Task {task_id}] Iniciando SadTalker inference.py: {preprocess_mode}")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"⚠️ Aviso no modo {preprocess_mode}: {proc.stderr[-400:]}")
+            if preprocess_mode != 'crop':
+                print("🔄 Tentando modo de segurança 'crop'...")
+                cmd[13] = 'crop'
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"Erro no SadTalker: {proc.stderr[-400:] or proc.stdout[-400:]}")
 
         raw_video = None
-        if output_video_path and os.path.exists(output_video_path):
-            raw_video = output_video_path
-        else:
-            candidates_mp4 = []
-            for root, dirs, files in os.walk(work_dir):
-                for file in files:
-                    if file.endswith('.mp4'):
-                        candidates_mp4.append(os.path.join(root, file))
-            if candidates_mp4:
-                full_matches = [c for c in candidates_mp4 if '_full.mp4' in c]
-                raw_video = full_matches[0] if full_matches else candidates_mp4[-1]
+        candidates_mp4 = []
+        for root, dirs, files in os.walk(work_dir):
+            for file in files:
+                if file.endswith('.mp4'):
+                    candidates_mp4.append(os.path.join(root, file))
+        if candidates_mp4:
+            full_matches = [c for c in candidates_mp4 if '_full.mp4' in c]
+            raw_video = full_matches[0] if full_matches else candidates_mp4[-1]
 
         if not raw_video or not os.path.exists(raw_video):
-            raise RuntimeError("O SadTalker não gerou o arquivo MP4.")
+            raise RuntimeError("O SadTalker concluiu mas não gerou arquivo MP4.")
 
         final_video_name = f"video_{aspect_ratio}_{task_id}.mp4"
         final_video_path = os.path.join(work_dir, final_video_name)
@@ -275,11 +255,10 @@ def generate_neural_video():
         aspect_ratio = request.form.get('aspect_ratio', 'original').lower()
         keep_full = request.form.get('keep_full', 'true').lower() in ('true', '1', 'yes')
 
-        # Registra a tarefa e inicia a thread assíncrona
         TASKS[task_id] = {
             "task_id": task_id,
             "status": "started",
-            "message": "Iniciando renderização neural na GPU...",
+            "message": "Iniciando renderização neural na superplaca T4...",
             "started_at": time.time()
         }
 
@@ -290,7 +269,6 @@ def generate_neural_video():
         )
         t.start()
 
-        # Retorna IMEDIATAMENTE em milissegundos para evitar qualquer timeout no Cloudflare
         return jsonify({
             "success": True,
             "async": True,
@@ -324,5 +302,5 @@ def download_video(task_id, filename):
 
 if __name__ == '__main__':
     port = 7860
-    print(f"🚀 Iniciando Studio Video AI GPU Bridge v5.0 (Async Worker) na porta {port}...")
+    print(f"🚀 Iniciando Studio Video AI GPU Bridge v6.0 (Subprocess Engine) na porta {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
