@@ -2017,31 +2017,59 @@
 
         try {
           while (!isDone) {
-            await new Promise(r => setTimeout(r, 3000));
+            let pollRes = null;
+            let netFailed = false;
 
-            let pollRes;
             try {
               pollRes = await fetch(`${cleanGpuUrl}/api/task_status/${taskId}`);
-              consecutiveNetErrors = 0;
-            } catch(e) {
-              consecutiveNetErrors++;
-              console.warn(`Falha de rede no polling (${consecutiveNetErrors}/4):`, e);
-              if (consecutiveNetErrors >= 4) {
-                let healthOk = false;
-                try {
-                  const hRes = await fetch(`${cleanGpuUrl}/api/health`, { method: 'GET' });
-                  healthOk = hRes.ok;
-                } catch(he) {
-                  healthOk = false;
-                }
-                if (!healthOk) {
-                  throw new Error('Conexão com o Colab/túnel perdida.');
-                }
+              if (pollRes.status === 502 || pollRes.status === 503 || pollRes.status === 504) {
+                netFailed = true;
               }
-              progressStatusMsg.innerHTML = `<span style="color:#fbbf24;">Aguardando reconexão da GPU (${consecutiveNetErrors}/4)...</span>`;
+            } catch(e) {
+              netFailed = true;
+            }
+
+            // 1. Falha de rede/health NÃO deve abortar nem apagar task_id
+            if (netFailed) {
+              if (netErrorStartTime === null) {
+                netErrorStartTime = Date.now();
+              }
+              consecutiveNetErrors++;
+              const disconnectedSec = Math.floor((Date.now() - netErrorStartTime) / 1000);
+
+              // Só abortar se ficar 15 min seguidos sem nenhuma resposta
+              if (disconnectedSec >= 15 * 60) {
+                submitBtn.disabled = false;
+                submitBtnText.textContent = 'Gerar Vídeo Agora';
+                progressBarFillEl.style.width = '100%';
+                progressBarFillEl.style.background = '#f59e0b';
+                progressPctLabel.textContent = 'Pausa';
+                progressStatusMsg.innerHTML = `<span style="color:#f59e0b; font-weight:700;">⚠️ Sem conexão com o Colab por mais de 15 minutos. A tarefa continua salva.</span> <button type="button" id="retryResumeBtn" style="margin-left:8px; padding:3px 10px; background:#6366f1; color:#fff; border:none; border-radius:6px; font-weight:700; cursor:pointer;">Tentar retomar</button>`;
+                const rBtn = document.getElementById('retryResumeBtn');
+                if (rBtn) {
+                  rBtn.onclick = () => runGpuTaskPolling(taskId, cleanGpuUrl);
+                }
+                return;
+              }
+
+              // Espera crescente: 3s -> 10s -> 30s
+              let waitMs = 3000;
+              if (consecutiveNetErrors >= 4) {
+                waitMs = 30000;
+              } else if (consecutiveNetErrors >= 2) {
+                waitMs = 10000;
+              }
+
+              progressStatusMsg.innerHTML = `<span style="color:#fbbf24; font-weight:600;">⚠️ Sem conexão com o Colab, tentando de novo...</span> <span style="color:#94a3b8; font-size:0.75rem;">(tentativa ${consecutiveNetErrors} · próxima em ${waitMs / 1000}s)</span>`;
+              await new Promise(r => setTimeout(r, waitMs));
               continue;
             }
 
+            // 3. Ao voltar a conexão, retoma o polling normal
+            consecutiveNetErrors = 0;
+            netErrorStartTime = null;
+
+            // 2. 404 (tarefa inexistente): limpa localStorage e lança erro
             if (pollRes.status === 404) {
               localStorage.removeItem('studio_active_task_id');
               localStorage.removeItem('studio_active_task_url');
@@ -2073,6 +2101,7 @@
               );
             } else if (taskState.status === 'completed') {
               isDone = true;
+              // 2. Limpar localStorage apenas em: completed
               localStorage.removeItem('studio_active_task_id');
               localStorage.removeItem('studio_active_task_url');
               const videoFinalUrl = taskState.video_url.startsWith('http') ? taskState.video_url : `${cleanGpuUrl}${taskState.video_url}`;
@@ -2081,15 +2110,21 @@
               return;
             } else if (taskState.status === 'error') {
               isDone = true;
+              // 2. Limpar localStorage apenas em: error devolvido pelo servidor
               localStorage.removeItem('studio_active_task_id');
               localStorage.removeItem('studio_active_task_url');
               const tailMsg = (taskState.log_tail && taskState.log_tail.length) ? `\nÚltimos logs:\n${taskState.log_tail.join('\n')}` : '';
               throw new Error((taskState.error || 'Erro interno na renderização neural') + tailMsg);
             }
+
+            await new Promise(r => setTimeout(r, 3000));
           }
         } catch (gpuErr) {
-          localStorage.removeItem('studio_active_task_id');
-          localStorage.removeItem('studio_active_task_url');
+          // Limpa localStorage apenas se for 404 ou erro retornado pelo servidor
+          if (gpuErr.message.includes('perdeu a tarefa') || gpuErr.message.includes('Erro interno') || gpuErr.message.includes('Tempo limite excedido')) {
+            localStorage.removeItem('studio_active_task_id');
+            localStorage.removeItem('studio_active_task_url');
+          }
           submitBtn.disabled = false;
           submitBtnText.textContent = 'Gerar Vídeo Agora';
           progressBarFillEl.style.width = '100%';
