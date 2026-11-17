@@ -1,6 +1,6 @@
 """
-Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.1 (Verified Engine)
-Executa o SadTalker em processo OS isolado com pesos 100% pré-carregados e telemetria em tempo real.
+Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.2 (Diagnóstico e Proteção)
+Executa o SadTalker em processo OS isolado com telemetria de etapas, proteção contra timeout e health check rigoroso.
 """
 
 import os
@@ -8,23 +8,32 @@ import sys
 import time
 import uuid
 import json
-import base64
 import shutil
 import threading
 import subprocess
 from flask import Flask, request, jsonify, send_file
 from PIL import Image
 
-# Import opcional de CORS com fallback seguro via after_request
+try:
+    import torch
+    HAS_TORCH = True
+except Exception:
+    HAS_TORCH = False
+
 try:
     from flask_cors import CORS
     HAS_CORS = True
 except Exception:
     HAS_CORS = False
 
-SADTALKER_DIR = os.path.abspath("/content/SadTalker")
+SADTALKER_DIR = os.environ.get("SADTALKER_DIR", os.path.abspath("/content/SadTalker"))
 if SADTALKER_DIR not in sys.path:
     sys.path.insert(0, SADTALKER_DIR)
+
+CHECKPOINTS_DIR = os.environ.get("CHECKPOINTS_DIR", os.path.join(SADTALKER_DIR, "checkpoints"))
+RESULTS_DIR = os.environ.get("RESULTS_DIR", os.path.abspath("/content/output_videos"))
+WORKER_TIMEOUT_S = int(os.environ.get("WORKER_TIMEOUT_S", 600))  # 10 min padrão
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 def patch_paste_pic():
     paste_file = os.path.join(SADTALKER_DIR, "src/utils/paste_pic.py")
@@ -56,9 +65,6 @@ def patch_paste_pic():
 
 patch_paste_pic()
 
-RESULTS_DIR = "/content/output_videos"
-os.makedirs(RESULTS_DIR, exist_ok=True)
-
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 if HAS_CORS:
@@ -76,16 +82,50 @@ def after_request(response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept, Origin'
     return response
 
+def get_log_tail(log_path, n=15):
+    if not log_path or not os.path.exists(log_path):
+        return []
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = [l.rstrip("\r\n") for l in f.readlines() if l.strip()]
+            return lines[-n:]
+    except Exception:
+        return []
+
+def check_environment_health():
+    cuda_ok = bool(torch.cuda.is_available()) if HAS_TORCH else False
+    inference_ok = os.path.exists(os.path.join(SADTALKER_DIR, "inference.py"))
+    ckpt_512_ok = os.path.exists(os.path.join(CHECKPOINTS_DIR, "SadTalker_V0.0.2_512.safetensors"))
+    ckpt_mapping_ok = os.path.exists(os.path.join(CHECKPOINTS_DIR, "mapping_00109-model.pth.tar"))
+    ckpt_bfm_ok = os.path.exists(os.path.join(CHECKPOINTS_DIR, "BFM_Fitting"))
+
+    ready = bool(cuda_ok and inference_ok and ckpt_512_ok and ckpt_mapping_ok and ckpt_bfm_ok)
+    return {
+        "ready": ready,
+        "cuda_available": cuda_ok,
+        "inference_script": inference_ok,
+        "checkpoint_512": ckpt_512_ok,
+        "checkpoint_mapping": ckpt_mapping_ok,
+        "checkpoint_bfm": ckpt_bfm_ok,
+        "gpu": torch.cuda.get_device_name(0) if (HAS_TORCH and cuda_ok) else "None (CPU)"
+    }
+
 @app.route('/api/health', methods=['GET', 'OPTIONS'])
 def health():
     if request.method == 'OPTIONS':
         return jsonify({"ready": True}), 200
+    h = check_environment_health()
     return jsonify({
         "status": "online",
-        "ready": True,
-        "gpu": "NVIDIA T4 15GB (Google Colab)",
-        "engine": "SadTalker Full-Frame 512px (High-Speed Engine v7.1)",
-        "bridge": "Studio Video AI Cloud Bridge v7.1"
+        "ready": h["ready"],
+        "cuda_available": h["cuda_available"],
+        "inference_script": h["inference_script"],
+        "checkpoint_512": h["checkpoint_512"],
+        "checkpoint_mapping": h["checkpoint_mapping"],
+        "checkpoint_bfm": h["checkpoint_bfm"],
+        "gpu": h["gpu"],
+        "engine": "SadTalker Full-Frame 512px (High-Speed Engine v7.2)",
+        "bridge": "Studio Video AI Cloud Bridge v7.2"
     })
 
 @app.route('/api/logs', methods=['GET'])
@@ -128,53 +168,89 @@ def convert_video_aspect_ratio(input_video, output_video, ratio='original'):
         "-c:a", "copy",
         output_video
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0 or not os.path.exists(output_video):
-        print(f"Aviso ffmpeg: {res.stderr}. Mantendo vídeo original.")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.exists(output_video):
+            print(f"Aviso ffmpeg: {res.stderr}. Mantendo vídeo original.")
+            shutil.copy2(input_video, output_video)
+    except Exception as e_ff:
+        print(f"Aviso ffmpeg exception: {e_ff}. Mantendo vídeo original.")
         shutil.copy2(input_video, output_video)
     return output_video
 
 def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full):
     try:
         TASKS[task_id]["status"] = "processing"
-        TASKS[task_id]["message"] = "Iniciando motor neural na superplaca NVIDIA T4..."
+        TASKS[task_id]["stage"] = "init"
+        TASKS[task_id]["message"] = "Preparando mídia e ambiente neural..."
 
         preprocess_mode = 'full' if keep_full else 'crop'
 
         temp_img = os.path.join(work_dir, "render_input" + os.path.splitext(image_path)[1])
         shutil.copy2(image_path, temp_img)
 
+        # 3. Redimensionar imagem de entrada para no máx. 1024 px no lado maior
+        try:
+            with Image.open(temp_img) as im:
+                w, h = im.size
+                max_side = max(w, h)
+                if max_side > 1024:
+                    scale = 1024.0 / max_side
+                    new_w, new_h = int(round(w * scale)), int(round(h * scale))
+                    im_resized = im.resize((new_w, new_h), Image.LANCZOS)
+                    if im_resized.mode in ("RGBA", "P"):
+                        im_resized = im_resized.convert("RGB")
+                    im_resized.save(temp_img, quality=95)
+                    print(f"🖼️ [Task {task_id}] Imagem redimensionada de {w}x{h} para {new_w}x{new_h} (max 1024px)")
+        except Exception as e_resize:
+            print(f"⚠️ Aviso ao redimensionar imagem: {e_resize}")
+
         temp_aud = os.path.join(work_dir, "render_audio" + os.path.splitext(audio_path)[1])
         shutil.copy2(audio_path, temp_aud)
 
         task_log_path = os.path.join(work_dir, "task_render.log")
+        TASKS[task_id]["log_path"] = task_log_path
 
         cmd = [
-            sys.executable, "/content/SadTalker/inference.py",
+            sys.executable, os.path.join(SADTALKER_DIR, "inference.py"),
             "--driven_audio", temp_aud,
             "--source_image", temp_img,
             "--result_dir", work_dir,
-            "--checkpoint_dir", "/content/SadTalker/checkpoints",
-            "--bfm_folder", "/content/SadTalker/checkpoints/BFM_Fitting",
+            "--checkpoint_dir", CHECKPOINTS_DIR,
+            "--bfm_folder", os.path.join(CHECKPOINTS_DIR, "BFM_Fitting"),
             "--size", "512",
             "--preprocess", preprocess_mode,
             "--still"
         ]
 
         print(f"🚀 [Task {task_id}] Executando SadTalker inference.py (modo: {preprocess_mode})")
-        TASKS[task_id]["message"] = f"Mapeando malha 3D e fonemas (GPU T4)..."
+        TASKS[task_id]["stage"] = "3dmm"
+        TASKS[task_id]["message"] = "Mapeando malha 3D e pontos faciais do personagem..."
+
+        sub_start_time = time.time()
+        timeout_s = int(os.environ.get("WORKER_TIMEOUT_S", 600))
+        timed_out = False
 
         with open(task_log_path, "w", encoding="utf-8") as log_f:
             proc = subprocess.Popen(
                 cmd,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
-                cwd="/content/SadTalker"
+                cwd=SADTALKER_DIR
             )
+            TASKS[task_id]["proc_alive"] = True
 
-            # Monitoramento ativo do log para telemetria em tempo real
             while proc.poll() is None:
-                time.sleep(2.5)
+                time.sleep(0.3)
+                # 2. Timeout máximo no subprocesso do SadTalker
+                elapsed_sub = time.time() - sub_start_time
+                if elapsed_sub > timeout_s and proc.poll() is None:
+                    print(f"🛑 [Task {task_id}] Timeout de {timeout_s}s atingido! Matando subprocesso...")
+                    proc.kill()
+                    proc.wait()
+                    timed_out = True
+                    break
+
                 try:
                     if os.path.exists(task_log_path):
                         with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
@@ -182,21 +258,40 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
                             if lines:
                                 last_l = lines[-1]
                                 if "3DMM" in last_l:
+                                    TASKS[task_id]["stage"] = "3dmm"
                                     TASKS[task_id]["message"] = "Extraindo malha 3D facial do personagem..."
-                                elif "audio2exp" in last_l:
+                                elif "audio2exp" in last_l or "audio2pose" in last_l or "audio2ceoff" in last_l:
+                                    TASKS[task_id]["stage"] = "audio2exp"
                                     TASKS[task_id]["message"] = "Sincronizando áudio e expressões neurais..."
-                                elif "facerender" in last_l or "facerender_batch" in last_l:
+                                elif "facerender" in last_l or "facerender_batch" in last_l or "make_animation" in last_l:
+                                    TASKS[task_id]["stage"] = "facerender"
                                     TASKS[task_id]["message"] = "GPU Tesla T4 desenhando quadros faciais em 512px..."
-                                elif "seamlessClone" in last_l:
+                                elif "seamlessClone" in last_l or "paste_pic" in last_l:
+                                    TASKS[task_id]["stage"] = "paste"
                                     TASKS[task_id]["message"] = "Integrando alta resolução e enquadramento completo..."
                                 else:
-                                    TASKS[task_id]["message"] = f"Renderizando na superplaca T4 ({last_l[-45:]})..."
+                                    TASKS[task_id]["message"] = f"Processando GPU T4 ({last_l[-45:]})..."
                 except Exception:
                     pass
 
-        # Fallback de segurança automático se o modo full falhar
+        TASKS[task_id]["proc_alive"] = False
+
+        # 2. Se estourou o timeout: status="error" com últimas linhas do log e NÃO rodar fallback "crop"
+        if timed_out:
+            TASKS[task_id]["finished_at"] = time.time()
+            tail_lines = get_log_tail(task_log_path, 15)
+            tail_str = "\n".join(tail_lines) if tail_lines else "Nenhum log gerado pelo processo."
+            err_msg = f"Tempo limite de {timeout_s}s excedido no SadTalker.\nÚltimos logs:\n{tail_str}"
+            TASKS[task_id]["status"] = "error"
+            TASKS[task_id]["error"] = err_msg
+            TASKS[task_id]["message"] = f"Timeout de {timeout_s}s no SadTalker"
+            print(f"❌ [Task {task_id}] {err_msg}")
+            return
+
+        # Fallback de segurança para modo crop apenas se falhou SEM timeout
         if proc.returncode != 0 and preprocess_mode != 'crop':
             print(f"⚠️ Aviso no modo {preprocess_mode}. Tentando modo de segurança 'crop'...")
+            TASKS[task_id]["stage"] = "facerender"
             TASKS[task_id]["message"] = "Ajustando para modo de segurança (crop)..."
             cmd_crop = list(cmd)
             cmd_crop[cmd_crop.index('--preprocess') + 1] = 'crop'
@@ -205,10 +300,18 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
                     cmd_crop,
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
-                    cwd="/content/SadTalker"
+                    cwd=SADTALKER_DIR
                 )
+                TASKS[task_id]["proc_alive"] = True
+                sub_crop_start = time.time()
+
                 while proc.poll() is None:
-                    time.sleep(2.5)
+                    time.sleep(2.0)
+                    if time.time() - sub_crop_start > WORKER_TIMEOUT_S:
+                        proc.kill()
+                        proc.wait()
+                        timed_out = True
+                        break
                     try:
                         if os.path.exists(task_log_path):
                             with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
@@ -217,17 +320,26 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
                                     TASKS[task_id]["message"] = f"GPU T4 (Segurança): {lines[-1][-45:]}"
                     except Exception:
                         pass
+                TASKS[task_id]["proc_alive"] = False
+
+            if timed_out:
+                TASKS[task_id]["finished_at"] = time.time()
+                tail_lines = get_log_tail(task_log_path, 15)
+                tail_str = "\n".join(tail_lines) if tail_lines else ""
+                err_msg = f"Tempo limite de {WORKER_TIMEOUT_S}s excedido no SadTalker (modo crop).\nÚltimos logs:\n{tail_str}"
+                TASKS[task_id]["status"] = "error"
+                TASKS[task_id]["error"] = err_msg
+                TASKS[task_id]["message"] = f"Timeout de {WORKER_TIMEOUT_S}s no SadTalker"
+                print(f"❌ [Task {task_id}] {err_msg}")
+                return
 
         if proc.returncode != 0:
-            err_details = "Erro de execução no SadTalker"
-            try:
-                if os.path.exists(task_log_path):
-                    with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
-                        err_lines = [ln.strip() for ln in rf.readlines() if ln.strip()]
-                        err_details = "\n".join(err_lines[-12:])
-            except Exception:
-                pass
-            raise RuntimeError(f"Falha na GPU: {err_details}")
+            tail_lines = get_log_tail(task_log_path, 15)
+            err_details = "\n".join(tail_lines) if tail_lines else "Erro de execução no SadTalker"
+            raise RuntimeError(f"Falha na execução do SadTalker:\n{err_details}")
+
+        TASKS[task_id]["stage"] = "encode"
+        TASKS[task_id]["message"] = "Finalizando codificação e enquadramento do vídeo..."
 
         raw_video = None
         candidates_mp4 = []
@@ -248,23 +360,28 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
 
         final_video = final_video_path if os.path.exists(final_video_path) else raw_video
         out_filename = os.path.basename(final_video)
+        size_mb = round(os.path.getsize(final_video) / (1024 * 1024), 2)
 
-        with open(final_video, 'rb') as f_vid:
-            video_b64 = f"data:video/mp4;base64,{base64.b64encode(f_vid.read()).decode('utf-8')}"
-
-        TASKS[task_id]["status"] = "completed"
-        TASKS[task_id]["message"] = "Vídeo finalizado com sucesso!"
+        # 5. Preencher filename/video_url/size_mb ANTES de setar status="completed"
+        TASKS[task_id]["finished_at"] = time.time()
+        TASKS[task_id]["stage"] = "done"
         TASKS[task_id]["filename"] = out_filename
-        TASKS[task_id]["video_base64"] = video_b64
         TASKS[task_id]["video_url"] = f"/api/download/{task_id}/{out_filename}"
-        TASKS[task_id]["size_mb"] = round(os.path.getsize(final_video) / (1024 * 1024), 2)
-        print(f"🎉 Tarefa {task_id} concluída com sucesso: {out_filename}")
+        TASKS[task_id]["size_mb"] = size_mb
+        TASKS[task_id]["proc_alive"] = False
+        TASKS[task_id]["message"] = "Vídeo finalizado com sucesso!"
+        TASKS[task_id]["status"] = "completed"
+
+        print(f"🎉 Tarefa {task_id} concluída com sucesso: {out_filename} ({size_mb} MB)")
 
     except Exception as e:
         import traceback
         traceback.print_exc()
+        TASKS[task_id]["finished_at"] = time.time()
+        TASKS[task_id]["proc_alive"] = False
         TASKS[task_id]["status"] = "error"
         TASKS[task_id]["error"] = str(e)
+        TASKS[task_id]["message"] = f"Erro: {str(e).splitlines()[0]}"
         print(f"❌ Erro na tarefa {task_id}: {e}")
 
 @app.route('/api/generate_neural_video', methods=['POST', 'OPTIONS'])
@@ -319,7 +436,7 @@ def generate_neural_video():
         if not audio_path or not os.path.exists(audio_path):
             candidates_audio = [
                 "/content/fala_maconica.mp3",
-                "/content/SadTalker/examples/driven_audio/bus_chinese.wav"
+                os.path.join(SADTALKER_DIR, "examples/driven_audio/bus_chinese.wav")
             ]
             for ca in candidates_audio:
                 if os.path.exists(ca):
@@ -335,8 +452,12 @@ def generate_neural_video():
         TASKS[task_id] = {
             "task_id": task_id,
             "status": "started",
+            "stage": "init",
             "message": "Iniciando renderização neural na superplaca T4...",
-            "started_at": time.time()
+            "started_at": time.time(),
+            "finished_at": None,
+            "proc_alive": False,
+            "log_path": os.path.join(work_dir, "task_render.log")
         }
 
         t = threading.Thread(
@@ -365,19 +486,43 @@ def task_status(task_id):
     if not task:
         return jsonify({"success": False, "error": "Tarefa não encontrada"}), 404
 
-    return jsonify({
+    now = time.time()
+    started_at = task.get("started_at", now)
+    finished_at = task.get("finished_at")
+    elapsed_s = round((finished_at - started_at) if finished_at else (now - started_at), 1)
+
+    log_tail = get_log_tail(task.get("log_path"), 15)
+
+    resp = {
         "success": True,
-        **task
-    }), 200
+        "task_id": task_id,
+        "status": task.get("status", "started"),
+        "message": task.get("message", ""),
+        "elapsed_s": elapsed_s,
+        "stage": task.get("stage", "init"),
+        "log_tail": log_tail,
+        "proc_alive": bool(task.get("proc_alive", False))
+    }
+
+    if task.get("error"):
+        resp["error"] = task.get("error")
+
+    if task.get("status") == "completed":
+        resp["filename"] = task.get("filename")
+        resp["video_url"] = task.get("video_url")
+        resp["size_mb"] = task.get("size_mb")
+
+    return jsonify(resp), 200
 
 @app.route('/api/download/<task_id>/<filename>')
 def download_video(task_id, filename):
     video_path = os.path.join(RESULTS_DIR, f"task_{task_id}", filename)
     if os.path.exists(video_path):
-        return send_file(video_path, mimetype='video/mp4', as_attachment=True, download_name=filename)
+        as_attachment = request.args.get('download', '0') == '1'
+        return send_file(video_path, mimetype='video/mp4', as_attachment=as_attachment, download_name=filename)
     return jsonify({"error": "Vídeo não encontrado"}), 404
 
 if __name__ == '__main__':
-    port = 7860
-    print(f"🚀 Iniciando Studio Video AI GPU Bridge v7.1 na porta {port}...")
+    port = int(os.environ.get("PORT", 7860))
+    print(f"🚀 Iniciando Studio Video AI GPU Bridge v7.2 na porta {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)

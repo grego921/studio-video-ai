@@ -1430,6 +1430,7 @@
           <span class="step-badge-pill" id="st4">4. Mixagem</span>
           <span class="step-badge-pill" id="st5">5. Renderização</span>
         </div>
+        <div id="gpuLogTailBox" style="display:none; margin-top:12px; font-family:Consolas, monospace; font-size:0.75rem; color:#94a3b8; background:rgba(0,0,0,0.4); border:1px solid var(--border-subtle); border-radius:6px; padding:8px 12px; max-height:110px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;"></div>
       </div>
 
       <!-- Player de Vídeo Concluído -->
@@ -1936,25 +1937,65 @@
           neuralFormData.append('use_enhancer', 'true');
           neuralFormData.append('still_mode', 'true');
 
-          const stages = [
-            { pct: 20, msg: '1/5 Sintetizando voz e sincronia de áudio...' },
-            { pct: 40, msg: '2/5 Mapeando malha 3D e pontos faciais do personagem...' },
-            { pct: 65, msg: '3/5 Renderizando movimentos de cabeça e fala em 3D...' },
-            { pct: 85, msg: '4/5 Superplaca NVIDIA T4 desenhando quadros neurais...' },
-            { pct: 92, msg: '5/5 Finalizando codificação e áudio do vídeo...' },
-            { pct: 96, msg: 'Quase pronto! Recebendo vídeo da superplaca...' }
-          ];
-          let sIdx = 0;
+          // 6. Atualização real dos 5 chips conforme o stage do SadTalker
+          function applyGpuStage(stage, elapsed_s, message, logTail) {
+            const chips = [st1, st2, st3, st4, st5];
+            chips.forEach(c => { if (c) c.classList.remove('active', 'done'); });
 
-          const neuralProgressInterval = setInterval(() => {
-            if (sIdx < stages.length) {
-              progressBarFillEl.style.width = `${stages[sIdx].pct}%`;
-              progressPctLabel.textContent = `${stages[sIdx].pct}%`;
-              progressStatusMsg.textContent = stages[sIdx].msg;
-              updateSteps(stages[sIdx].pct);
-              sIdx++;
+            let pct = 10;
+            const normStage = (stage || 'init').toLowerCase();
+
+            if (normStage === 'init' || normStage === 'started') {
+              pct = 15;
+              if (st1) st1.classList.add('active');
+            } else if (normStage === '3dmm') {
+              pct = 30;
+              if (st1) st1.classList.add('done');
+              if (st2) st2.classList.add('active');
+            } else if (normStage === 'audio2exp') {
+              pct = 50;
+              if (st1) st1.classList.add('done');
+              if (st2) st2.classList.add('done');
+              if (st3) st3.classList.add('active');
+            } else if (normStage === 'facerender') {
+              pct = 70;
+              if (st1) st1.classList.add('done');
+              if (st2) st2.classList.add('done');
+              if (st3) st3.classList.add('active');
+            } else if (normStage === 'paste') {
+              pct = 85;
+              if (st1) st1.classList.add('done');
+              if (st2) st2.classList.add('done');
+              if (st3) st3.classList.add('done');
+              if (st4) st4.classList.add('active');
+            } else if (normStage === 'encode') {
+              pct = 95;
+              if (st1) st1.classList.add('done');
+              if (st2) st2.classList.add('done');
+              if (st3) st3.classList.add('done');
+              if (st4) st4.classList.add('done');
+              if (st5) st5.classList.add('active');
+            } else if (normStage === 'done') {
+              pct = 100;
+              chips.forEach(c => { if (c) c.classList.add('done'); });
             }
-          }, 9000);
+
+            progressBarFillEl.style.width = `${pct}%`;
+            progressPctLabel.textContent = `${pct}%`;
+
+            const m = Math.floor((elapsed_s || 0) / 60);
+            const s = Math.floor((elapsed_s || 0) % 60);
+            const timeStr = `${m}m ${s < 10 ? '0' : ''}${s}s`;
+            const stageLabel = normStage.toUpperCase();
+            progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ [${timeStr}] Etapa: ${stageLabel}</span> - <span style="color:#e2e8f0;">${message || ''}</span>`;
+
+            const logBox = document.getElementById('gpuLogTailBox');
+            if (logBox && logTail && logTail.length) {
+              logBox.style.display = 'block';
+              logBox.style.borderColor = 'var(--border-subtle)';
+              logBox.textContent = logTail.slice(-4).join('\n');
+            }
+          }
 
           try {
             let cleanGpuUrl = (savedGpuUrl || '').trim().replace(/\/+$/, '');
@@ -1978,13 +2019,15 @@
               throw new Error(initData.error || 'A GPU não iniciou a tarefa');
             }
 
+            let lastStage = 'init';
+            let lastElapsedS = 0;
+            let lastLogTail = [];
+
             // Função auxiliar de sucesso e entrega do vídeo
             const handleSuccessVideo = (videoFinalUrl, outFilename, sizeMb) => {
-              clearInterval(neuralProgressInterval);
+              applyGpuStage('done', lastElapsedS, '🎉 Vídeo 3D gerado com sucesso pelo Motor GPU!', lastLogTail);
               progressBarFillEl.style.width = '100%';
               progressPctLabel.textContent = '100%';
-              progressStatusMsg.textContent = '🎉 Vídeo 3D gerado com sucesso pelo Motor GPU!';
-              updateSteps(100);
 
               if (spinEl) spinEl.style.display = 'none';
               if (strongEl) {
@@ -2008,12 +2051,14 @@
               loadGallery();
             };
 
-            // Se o servidor for assíncrono (v7.0): faz polling a cada 3s com telemetria em tempo real
+            let consecutiveNetErrors = 0;
+
+            // Polling assíncrono com telemetria real (v7.2)
             if (initData.async && initData.task_id) {
               const taskId = initData.task_id;
               let isDone = false;
               let attempts = 0;
-              const maxAttempts = 300; // até 15 minutos de tolerância para vídeos longos
+              const maxAttempts = 300; // até 15 minutos
 
               while (!isDone && attempts < maxAttempts) {
                 await new Promise(r => setTimeout(r, 3000));
@@ -2022,49 +2067,86 @@
                 let pollRes;
                 try {
                   pollRes = await fetch(`${cleanGpuUrl}/api/task_status/${taskId}`);
+                  consecutiveNetErrors = 0;
                 } catch(e) {
-                  console.warn('Polling temporariamente indisponível:', e);
-                  progressStatusMsg.innerHTML = '<span style="color:#fbbf24;">Aguardando resposta da GPU...</span>';
+                  consecutiveNetErrors++;
+                  console.warn(`Falha de rede no polling (${consecutiveNetErrors}/4):`, e);
+                  if (consecutiveNetErrors >= 4) {
+                    let healthOk = false;
+                    try {
+                      const hRes = await fetch(`${cleanGpuUrl}/api/health`, { method: 'GET' });
+                      healthOk = hRes.ok;
+                    } catch(he) {
+                      healthOk = false;
+                    }
+                    if (!healthOk) {
+                      throw new Error('Conexão com o Colab/túnel perdida.');
+                    }
+                  }
+                  progressStatusMsg.innerHTML = `<span style="color:#fbbf24;">Aguardando reconexão da GPU (${consecutiveNetErrors}/4)...</span>`;
                   continue;
                 }
 
-                if (!pollRes.ok) continue;
+                // 7. 404 Tarefa não encontrada -> falhar na hora
+                if (pollRes.status === 404) {
+                  throw new Error('O Colab reiniciou e perdeu a tarefa; reconecte.');
+                }
+
+                if (!pollRes.ok) {
+                  const errText = await pollRes.text().catch(() => '');
+                  throw new Error(`Erro HTTP ${pollRes.status} no polling: ${errText.slice(0, 100)}`);
+                }
 
                 const taskState = await pollRes.json();
-                if (taskState.status === 'processing') {
-                  if (taskState.message) {
-                    progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ ${taskState.message}</span>`;
-                  }
+                lastStage = taskState.stage || lastStage;
+                lastElapsedS = taskState.elapsed_s != null ? taskState.elapsed_s : lastElapsedS;
+                if (taskState.log_tail && taskState.log_tail.length) {
+                  lastLogTail = taskState.log_tail;
+                }
+
+                if (taskState.status === 'processing' || taskState.status === 'started') {
+                  applyGpuStage(taskState.stage || 'init', taskState.elapsed_s || 0, taskState.message, taskState.log_tail);
                 } else if (taskState.status === 'completed') {
                   isDone = true;
-                  const videoFinalUrl = taskState.video_base64 || `${cleanGpuUrl}${taskState.video_url}`;
+                  const videoFinalUrl = taskState.video_url.startsWith('http') ? taskState.video_url : `${cleanGpuUrl}${taskState.video_url}`;
                   const outFilename = taskState.filename || 'video_neural_ia.mp4';
                   handleSuccessVideo(videoFinalUrl, outFilename, taskState.size_mb);
                   return;
                 } else if (taskState.status === 'error') {
-                  throw new Error(taskState.error || 'Erro interno na renderização neural');
+                  const tailMsg = (taskState.log_tail && taskState.log_tail.length) ? `\nÚltimos logs:\n${taskState.log_tail.join('\n')}` : '';
+                  throw new Error((taskState.error || 'Erro interno na renderização neural') + tailMsg);
                 }
               }
 
+              // 8. Mensagem de timeout informando último stage e log_tail
               if (!isDone) {
-                throw new Error('Tempo limite excedido aguardando a GPU.');
+                const tailMsg = lastLogTail.length ? `\nÚltimos logs:\n${lastLogTail.join('\n')}` : '';
+                const m = Math.floor(lastElapsedS / 60);
+                const s = Math.floor(lastElapsedS % 60);
+                throw new Error(`Tempo limite excedido na etapa "${lastStage}" após ${m}m ${s}s.${tailMsg}`);
               }
-            } else if (initData.video_base64 || initData.video_url) {
-              const videoFinalUrl = initData.video_base64 || `${cleanGpuUrl}${initData.video_url}`;
+            } else if (initData.video_url) {
+              const videoFinalUrl = initData.video_url.startsWith('http') ? initData.video_url : `${cleanGpuUrl}${initData.video_url}`;
               const outFilename = initData.filename || 'video_neural_ia.mp4';
               handleSuccessVideo(videoFinalUrl, outFilename, initData.size_mb);
               return;
             }
           } catch (gpuErr) {
-            clearInterval(neuralProgressInterval);
             submitBtn.disabled = false;
             submitBtnText.textContent = 'Gerar Vídeo Agora';
             progressBarFillEl.style.width = '100%';
             progressBarFillEl.style.background = '#ef4444';
             progressPctLabel.textContent = 'Erro';
-            progressStatusMsg.innerHTML = `<span style="color:#ef4444; font-weight:700;">❌ Falha na GPU: ${gpuErr.message}</span>`;
+            progressStatusMsg.innerHTML = `<span style="color:#ef4444; font-weight:700;">❌ ${gpuErr.message.split('\n')[0]}</span>`;
+
+            const logBox = document.getElementById('gpuLogTailBox');
+            if (logBox) {
+              logBox.style.display = 'block';
+              logBox.style.borderColor = '#ef4444';
+              logBox.textContent = gpuErr.message;
+            }
             console.error('Falha na renderização neural:', gpuErr);
-            alert('❌ Erro no Motor GPU (' + gpuErr.message + '):\n\nURL tentada: ' + cleanGpuUrl + '\n\nCertifique-se de que o Google Colab está ativo com a GPU T4 ligada e com o link correto.');
+            alert('❌ ' + gpuErr.message);
             return;
           }
         }
