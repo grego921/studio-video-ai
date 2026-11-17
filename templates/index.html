@@ -1695,6 +1695,7 @@
           allVideos.forEach(v => {
             const card = document.createElement('div');
             card.className = 'gallery-item-card';
+            const dlUrl = v.url.includes('?') ? `${v.url}&download=1` : `${v.url}?download=1`;
             card.innerHTML = `
               <div class="gallery-thumb" title="Clique para assistir">
                 <video preload="metadata" src="${v.url}#t=0.5"></video>
@@ -1703,7 +1704,7 @@
               <div class="gallery-info-box">
                 <div class="gallery-filename" title="${v.filename}">${v.filename}</div>
                 <div class="gallery-subtext"><span>${v.created_at || 'Recente'}</span><span>${v.size_mb || 3.5} MB</span></div>
-                <a href="${v.url}" download="${v.filename}" class="gallery-btn-dl">Baixar MP4</a>
+                <a href="${dlUrl}" download="${v.filename}" class="gallery-btn-dl">Baixar MP4</a>
               </div>
             `;
             card.querySelector('.gallery-thumb').addEventListener('click', () => {
@@ -1731,7 +1732,8 @@
         }
 
         // Link direto de download
-        downloadResultLink.href = url;
+        const dlUrl = url.includes('?') ? `${url}&download=1` : `${url}?download=1`;
+        downloadResultLink.href = dlUrl;
         downloadResultLink.setAttribute('download', filename);
 
         // Toca o vídeo suavemente (com mute defensivo se bloqueado por autoplay de navegadores)
@@ -2241,13 +2243,27 @@
           const res = await fetch(`${cleanUrl}/api/health`, { method: 'GET' });
           if (res.ok) {
             const data = await res.json();
-            gpuStatusDot.classList.add('connected');
-            gpuStatusLabel.textContent = '🟢 Motor GPU Ativo (NVIDIA T4)';
-            if (notify && gpuFeedbackBox) {
-              gpuFeedbackBox.className = 'gpu-feedback-box success';
-              gpuFeedbackBox.textContent = `Conectado com sucesso! ${data.engine || 'SadTalker + GFPGAN'}`;
+            if (data.ready === true) {
+              gpuStatusDot.classList.add('connected');
+              gpuStatusLabel.textContent = '🟢 Motor GPU Ativo (NVIDIA T4)';
+              if (notify && gpuFeedbackBox) {
+                gpuFeedbackBox.className = 'gpu-feedback-box success';
+                gpuFeedbackBox.textContent = `Conectado com sucesso! ${data.engine || 'SadTalker + GFPGAN'}`;
+              }
+              return true;
+            } else {
+              gpuStatusDot.classList.remove('connected');
+              gpuStatusLabel.textContent = '🔴 Colab sem GPU/modelo';
+              const checks = ['cuda_available', 'inference_script', 'checkpoint_512', 'checkpoint_mapping', 'checkpoint_bfm'];
+              const falseFields = checks.filter(field => !data[field]);
+              if (notify && gpuFeedbackBox) {
+                gpuFeedbackBox.className = 'gpu-feedback-box error';
+                gpuFeedbackBox.textContent = `🔴 Colab sem GPU/modelo: ${falseFields.join(', ')}`;
+              }
+              localStorage.removeItem('studio_gpu_bridge_url');
+              savedGpuUrl = '';
+              return false;
             }
-            return true;
           }
         } catch (err) {
           console.warn('Falha no healthcheck do motor GPU:', err);
