@@ -1395,7 +1395,7 @@
         </div>
 
         <!-- Seletor de Qualidade: Rápido (256) / Alta (512) -->
-        <div style="margin-bottom: 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <div style="margin-bottom: 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
             <label for="qualitySelect" style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); display: block;">⚡ Qualidade: Rápido (256) / Alta (512)</label>
             <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">Alta (512) padrão nítido · Rápido (256) até 4x mais rápido</span>
@@ -1404,6 +1404,42 @@
             <option value="high" selected>Alta (512)</option>
             <option value="fast">Rápido (256)</option>
           </select>
+        </div>
+
+        <!-- Seletor de Movimento: Natural / Estático / Copiar de vídeo -->
+        <div style="margin-bottom: 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px 14px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <div>
+              <label for="motionSelect" style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); display: block;">🎭 Movimento: Natural / Estático / Copiar de vídeo</label>
+              <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">Natural (cabeça viva) · Estático (pose fixa) · Copiar de vídeo (ref)</span>
+            </div>
+            <select id="motionSelect" style="background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.82rem; font-weight: 600; padding: 7px 12px; border-radius: var(--radius-sm); outline: none; cursor: pointer;">
+              <option value="natural" selected>Natural</option>
+              <option value="still">Estático</option>
+              <option value="ref">Copiar de vídeo</option>
+            </select>
+          </div>
+
+          <!-- Campos opcionais: Estilo de pose (0-45) e Intensidade de expressão -->
+          <div id="motionExtraOptions" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.05); margin-top: 10px;">
+            <div>
+              <label for="poseStyleInput" style="font-size: 0.76rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">Estilo de Pose (0 a 45):</label>
+              <input type="number" id="poseStyleInput" min="0" max="45" value="0" style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.8rem; padding: 5px 8px; border-radius: var(--radius-sm); outline: none;">
+            </div>
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <label for="expressionScaleSlider" style="font-size: 0.76rem; font-weight: 600; color: var(--text-muted);">Expressão Facial:</label>
+                <span id="expressionScaleLabel" style="font-size: 0.76rem; font-weight: 700; color: var(--accent);">1.3x</span>
+              </div>
+              <input type="range" id="expressionScaleSlider" min="0.8" max="1.6" step="0.05" value="1.3" style="width: 100%; accent-color: var(--primary);">
+            </div>
+          </div>
+
+          <!-- Upload de Vídeo de Referência (exibido apenas quando Copiar de vídeo) -->
+          <div id="refVideoGroup" style="display: none; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.05); margin-top: 10px;">
+            <label for="refVideoInput" style="font-size: 0.76rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">📹 Vídeo MP4 de Referência (pose e piscar):</label>
+            <input type="file" id="refVideoInput" accept="video/mp4,video/*" style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.8rem; padding: 6px 8px; border-radius: var(--radius-sm); outline: none;">
+          </div>
         </div>
 
         <!-- Botão de Ação -->
@@ -2225,14 +2261,32 @@
           const chosenQuality = qualityEl ? qualityEl.value : 'high';
           neuralFormData.append('quality', chosenQuality);
 
+          // 1. Movimento: Natural / Estático / Copiar de vídeo
+          const motionEl = document.getElementById('motionSelect');
+          const chosenMotion = motionEl ? motionEl.value : 'natural';
+          neuralFormData.append('motion', chosenMotion);
+
+          const poseStyleEl = document.getElementById('poseStyleInput');
+          const poseStyleVal = poseStyleEl ? parseInt(poseStyleEl.value, 10) : 0;
+          neuralFormData.append('pose_style', isNaN(poseStyleVal) ? '0' : String(Math.max(0, Math.min(45, poseStyleVal))));
+
+          const expScaleEl = document.getElementById('expressionScaleSlider');
+          const expScaleVal = expScaleEl ? parseFloat(expScaleEl.value) : 1.3;
+          neuralFormData.append('expression_scale', isNaN(expScaleVal) ? '1.3' : String(Math.max(0.8, Math.min(1.6, expScaleVal))));
+
+          if (chosenMotion === 'ref') {
+            const refVidInput = document.getElementById('refVideoInput');
+            if (refVidInput && refVidInput.files && refVidInput.files[0]) {
+              neuralFormData.append('ref_video', refVidInput.files[0]);
+            }
+          }
+
           if (activeTab === 'tabText') {
             neuralFormData.append('script_text', scriptText);
             neuralFormData.append('voice', document.getElementById('voiceSelect').value);
           } else if (speechInput.files[0]) {
             neuralFormData.append('speech_file', speechInput.files[0]);
           }
-          neuralFormData.append('use_enhancer', 'true');
-          neuralFormData.append('still_mode', 'true');
 
           try {
             let cleanGpuUrl = (savedGpuUrl || '').trim().replace(/\/+$/, '');
@@ -2480,6 +2534,31 @@
       if (pendingTaskId && pendingTaskUrl) {
         console.log('🔄 Retomando polling da tarefa salva:', pendingTaskId);
         runGpuTaskPolling(pendingTaskId, pendingTaskUrl);
+      }
+
+      // Controle de visibilidade e eventos de Movimento
+      const motionSelectEl = document.getElementById('motionSelect');
+      const motionExtraOptionsEl = document.getElementById('motionExtraOptions');
+      const refVideoGroupEl = document.getElementById('refVideoGroup');
+      const expressionScaleSliderEl = document.getElementById('expressionScaleSlider');
+      const expressionScaleLabelEl = document.getElementById('expressionScaleLabel');
+
+      if (expressionScaleSliderEl && expressionScaleLabelEl) {
+        expressionScaleSliderEl.addEventListener('input', () => {
+          expressionScaleLabelEl.textContent = `${parseFloat(expressionScaleSliderEl.value).toFixed(2)}x`;
+        });
+      }
+
+      if (motionSelectEl) {
+        motionSelectEl.addEventListener('change', () => {
+          const m = motionSelectEl.value;
+          if (motionExtraOptionsEl) {
+            motionExtraOptionsEl.style.display = (m === 'still') ? 'none' : 'grid';
+          }
+          if (refVideoGroupEl) {
+            refVideoGroupEl.style.display = (m === 'ref') ? 'block' : 'none';
+          }
+        });
       }
 
       loadPresets();

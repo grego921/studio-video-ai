@@ -182,7 +182,7 @@ def convert_video_aspect_ratio(input_video, output_video, ratio='original'):
         shutil.copy2(input_video, output_video)
     return output_video
 
-def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full, quality='high'):
+def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full, quality='high', motion='natural', pose_style=0, expression_scale=1.3, ref_video_path=None):
     try:
         TASKS[task_id]["status"] = "processing"
         TASKS[task_id]["stage"] = "init"
@@ -224,11 +224,26 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
             "--checkpoint_dir", CHECKPOINTS_DIR,
             "--bfm_folder", os.path.join(CHECKPOINTS_DIR, "BFM_Fitting"),
             "--size", render_size,
-            "--preprocess", preprocess_mode,
-            "--still"
+            "--preprocess", preprocess_mode
         ]
 
-        print(f"🚀 [Task {task_id}] Executando SadTalker inference.py (modo: {preprocess_mode}, size: {render_size}, quality: {quality})")
+        # 1. Opções de movimento: still / natural / ref
+        if motion == 'still':
+            cmd.append("--still")
+        elif motion == 'ref' and ref_video_path and os.path.exists(ref_video_path):
+            cmd.extend([
+                "--ref_pose", ref_video_path,
+                "--ref_eyeblink", ref_video_path,
+                "--pose_style", str(pose_style),
+                "--expression_scale", str(expression_scale)
+            ])
+        else: # natural (ou ref sem arquivo que cai em natural)
+            cmd.extend([
+                "--pose_style", str(pose_style),
+                "--expression_scale", str(expression_scale)
+            ])
+
+        print(f"🚀 [Task {task_id}] Executando SadTalker inference.py (modo: {preprocess_mode}, size: {render_size}, quality: {quality}, motion: {motion})")
         TASKS[task_id]["stage"] = "3dmm"
         TASKS[task_id]["message"] = "Mapeando malha 3D e pontos faciais do personagem..."
 
@@ -541,11 +556,45 @@ def generate_neural_video():
         if quality not in ('fast', 'high'):
             quality = 'high'
 
+        # 1. Movimento: still | natural | ref (padrão: natural)
+        motion = request.form.get('motion', 'natural').lower().strip()
+        if motion not in ('still', 'natural', 'ref'):
+            motion = 'natural'
+
+        try:
+            pose_style = int(request.form.get('pose_style', 0))
+        except (ValueError, TypeError):
+            pose_style = 0
+        pose_style = max(0, min(45, pose_style))
+
+        try:
+            expression_scale = float(request.form.get('expression_scale', 1.3))
+        except (ValueError, TypeError):
+            expression_scale = 1.3
+        expression_scale = max(0.8, min(1.6, round(expression_scale, 2)))
+
+        ref_video_path = None
+        if motion == 'ref':
+            if 'ref_video' in request.files and request.files['ref_video'].filename:
+                f_ref = request.files['ref_video']
+                ref_path = os.path.join(work_dir, "ref_pose_" + f_ref.filename)
+                f_ref.save(ref_path)
+                if os.path.exists(ref_path) and os.path.getsize(ref_path) > 0:
+                    ref_video_path = ref_path
+                else:
+                    motion = 'natural'
+            else:
+                # Se o arquivo não vier, cair em "natural"
+                motion = 'natural'
+
         TASKS[task_id] = {
             "task_id": task_id,
             "status": "started",
             "stage": "init",
             "quality": quality,
+            "motion": motion,
+            "pose_style": pose_style,
+            "expression_scale": expression_scale,
             "message": "Iniciando renderização neural na superplaca T4...",
             "started_at": time.time(),
             "finished_at": None,
@@ -559,7 +608,7 @@ def generate_neural_video():
 
         t = threading.Thread(
             target=background_video_worker,
-            args=(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full, quality),
+            args=(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full, quality, motion, pose_style, expression_scale, ref_video_path),
             daemon=True
         )
         t.start()
@@ -618,6 +667,9 @@ def task_status(task_id):
         "elapsed_s": elapsed_s,
         "stage": task.get("stage", "init"),
         "quality": task.get("quality", "high"),
+        "motion": task.get("motion", "natural"),
+        "pose_style": task.get("pose_style", 0),
+        "expression_scale": task.get("expression_scale", 1.3),
         "progress_pct": progress_pct,
         "step_current": step_current,
         "step_total": step_total,
