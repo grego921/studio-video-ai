@@ -1,6 +1,6 @@
 """
-Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.2 (Diagnóstico e Proteção)
-Executa o SadTalker em processo OS isolado com telemetria de etapas, proteção contra timeout e health check rigoroso.
+Servidor API da Superplaca GPU NVIDIA T4 - Studio Video AI v7.3 (Diagnóstico Avançado, Qualidade e Proteção Dinâmica)
+Executa o SadTalker em processo OS isolado com telemetria tqdm, proteção contra timeout por ausência de progresso e seleção de qualidade.
 """
 
 import os
@@ -8,6 +8,7 @@ import sys
 import time
 import uuid
 import json
+import re
 import shutil
 import threading
 import subprocess
@@ -32,7 +33,10 @@ if SADTALKER_DIR not in sys.path:
 
 CHECKPOINTS_DIR = os.environ.get("CHECKPOINTS_DIR", os.path.join(SADTALKER_DIR, "checkpoints"))
 RESULTS_DIR = os.environ.get("RESULTS_DIR", os.path.abspath("/content/output_videos"))
-WORKER_TIMEOUT_S = int(os.environ.get("WORKER_TIMEOUT_S", 600))  # 10 min padrão
+NO_PROGRESS_TIMEOUT_S = int(os.environ.get("NO_PROGRESS_TIMEOUT_S", 600))  # 10 min sem modificação no log
+MAX_TOTAL_TIMEOUT_S = int(os.environ.get("MAX_TOTAL_TIMEOUT_S", 3 * 3600))  # 3 horas de teto absoluto de segurança
+WORKER_TIMEOUT_S = NO_PROGRESS_TIMEOUT_S  # Compatibilidade legada
+TQDM_REGEX = re.compile(r'(\d+)/(\d+) \[(\d+:\d+)<(\d+:\d+)')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 def patch_paste_pic():
@@ -178,13 +182,14 @@ def convert_video_aspect_ratio(input_video, output_video, ratio='original'):
         shutil.copy2(input_video, output_video)
     return output_video
 
-def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full):
+def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full, quality='high'):
     try:
         TASKS[task_id]["status"] = "processing"
         TASKS[task_id]["stage"] = "init"
         TASKS[task_id]["message"] = "Preparando mídia e ambiente neural..."
 
         preprocess_mode = 'full' if keep_full else 'crop'
+        render_size = "256" if str(quality).lower() == "fast" else "512"
 
         temp_img = os.path.join(work_dir, "render_input" + os.path.splitext(image_path)[1])
         shutil.copy2(image_path, temp_img)
@@ -218,18 +223,23 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
             "--result_dir", work_dir,
             "--checkpoint_dir", CHECKPOINTS_DIR,
             "--bfm_folder", os.path.join(CHECKPOINTS_DIR, "BFM_Fitting"),
-            "--size", "512",
+            "--size", render_size,
             "--preprocess", preprocess_mode,
             "--still"
         ]
 
-        print(f"🚀 [Task {task_id}] Executando SadTalker inference.py (modo: {preprocess_mode})")
+        print(f"🚀 [Task {task_id}] Executando SadTalker inference.py (modo: {preprocess_mode}, size: {render_size}, quality: {quality})")
         TASKS[task_id]["stage"] = "3dmm"
         TASKS[task_id]["message"] = "Mapeando malha 3D e pontos faciais do personagem..."
 
         sub_start_time = time.time()
-        timeout_s = int(os.environ.get("WORKER_TIMEOUT_S", 600))
+        no_prog_limit = int(os.environ.get("NO_PROGRESS_TIMEOUT_S", NO_PROGRESS_TIMEOUT_S))
+        max_total_limit = int(os.environ.get("MAX_TOTAL_TIMEOUT_S", MAX_TOTAL_TIMEOUT_S))
+        last_mtime = None
+        last_size = None
+        last_progress_time = sub_start_time
         timed_out = False
+        timeout_reason = ""
 
         with open(task_log_path, "w", encoding="utf-8") as log_f:
             proc = subprocess.Popen(
@@ -242,13 +252,39 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
 
             while proc.poll() is None:
                 time.sleep(0.3)
-                # 2. Timeout máximo no subprocesso do SadTalker
-                elapsed_sub = time.time() - sub_start_time
-                if elapsed_sub > timeout_s and proc.poll() is None:
-                    print(f"🛑 [Task {task_id}] Timeout de {timeout_s}s atingido! Matando subprocesso...")
+
+                # Verifica se o log foi modificado
+                if os.path.exists(task_log_path):
+                    try:
+                        curr_mtime = os.path.getmtime(task_log_path)
+                        curr_size = os.path.getsize(task_log_path)
+                        if last_mtime is None or curr_mtime != last_mtime or curr_size != last_size:
+                            last_mtime = curr_mtime
+                            last_size = curr_size
+                            last_progress_time = time.time()
+                    except Exception:
+                        pass
+
+                now = time.time()
+                time_without_prog = now - last_progress_time
+                total_elapsed = now - sub_start_time
+
+                # (a) Timeout por ausência de progresso no log
+                if time_without_prog > no_prog_limit and proc.poll() is None:
+                    print(f"🛑 [Task {task_id}] Ausência de progresso no log por {int(time_without_prog)}s! Matando subprocesso...")
                     proc.kill()
                     proc.wait()
                     timed_out = True
+                    timeout_reason = f"ausência de novos logs por {no_prog_limit}s"
+                    break
+
+                # (b) Teto absoluto de segurança
+                if total_elapsed > max_total_limit and proc.poll() is None:
+                    print(f"🛑 [Task {task_id}] Teto de segurança de {max_total_limit}s excedido! Matando subprocesso...")
+                    proc.kill()
+                    proc.wait()
+                    timed_out = True
+                    timeout_reason = f"teto absoluto de segurança de {max_total_limit}s excedido"
                     break
 
                 try:
@@ -263,28 +299,39 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
                                 elif "audio2exp" in last_l or "audio2pose" in last_l or "audio2ceoff" in last_l:
                                     TASKS[task_id]["stage"] = "audio2exp"
                                     TASKS[task_id]["message"] = "Sincronizando áudio e expressões neurais..."
-                                elif "facerender" in last_l or "facerender_batch" in last_l or "make_animation" in last_l:
+                                elif "facerender" in last_l or "facerender_batch" in last_l or "make_animation" in last_l or "Face Renderer" in last_l:
                                     TASKS[task_id]["stage"] = "facerender"
-                                    TASKS[task_id]["message"] = "GPU Tesla T4 desenhando quadros faciais em 512px..."
+                                    TASKS[task_id]["message"] = f"GPU Tesla T4 desenhando quadros faciais em {render_size}px..."
                                 elif "seamlessClone" in last_l or "paste_pic" in last_l:
                                     TASKS[task_id]["stage"] = "paste"
                                     TASKS[task_id]["message"] = "Integrando alta resolução e enquadramento completo..."
                                 else:
                                     TASKS[task_id]["message"] = f"Processando GPU T4 ({last_l[-45:]})..."
+
+                                # Parseia a última linha tqdm do log
+                                for l in reversed(lines[-15:]):
+                                    m_tqdm = TQDM_REGEX.search(l)
+                                    if m_tqdm:
+                                        c_cur, c_tot, _, c_eta = m_tqdm.groups()
+                                        TASKS[task_id]["step_current"] = int(c_cur)
+                                        TASKS[task_id]["step_total"] = int(c_tot)
+                                        TASKS[task_id]["eta"] = c_eta
+                                        TASKS[task_id]["progress_pct"] = round((int(c_cur) / int(c_tot)) * 100, 1) if int(c_tot) > 0 else 0
+                                        break
                 except Exception:
                     pass
 
         TASKS[task_id]["proc_alive"] = False
 
-        # 2. Se estourou o timeout: status="error" com últimas linhas do log e NÃO rodar fallback "crop"
+        # Se estourou o timeout: status="error" com últimas linhas do log e NÃO rodar fallback "crop"
         if timed_out:
             TASKS[task_id]["finished_at"] = time.time()
             tail_lines = get_log_tail(task_log_path, 15)
             tail_str = "\n".join(tail_lines) if tail_lines else "Nenhum log gerado pelo processo."
-            err_msg = f"Tempo limite de {timeout_s}s excedido no SadTalker.\nÚltimos logs:\n{tail_str}"
+            err_msg = f"Tempo limite excedido no SadTalker ({timeout_reason}).\nÚltimos logs:\n{tail_str}"
             TASKS[task_id]["status"] = "error"
             TASKS[task_id]["error"] = err_msg
-            TASKS[task_id]["message"] = f"Timeout de {timeout_s}s no SadTalker"
+            TASKS[task_id]["message"] = f"Timeout no SadTalker ({timeout_reason})"
             print(f"❌ [Task {task_id}] {err_msg}")
             return
 
@@ -304,32 +351,74 @@ def background_video_worker(task_id, work_dir, image_path, audio_path, aspect_ra
                 )
                 TASKS[task_id]["proc_alive"] = True
                 sub_crop_start = time.time()
+                last_crop_mtime = None
+                last_crop_size = None
+                last_crop_progress = sub_crop_start
+                timed_out_crop = False
+                crop_timeout_reason = ""
 
                 while proc.poll() is None:
-                    time.sleep(2.0)
-                    if time.time() - sub_crop_start > WORKER_TIMEOUT_S:
+                    time.sleep(0.5)
+
+                    if os.path.exists(task_log_path):
+                        try:
+                            curr_m = os.path.getmtime(task_log_path)
+                            curr_s = os.path.getsize(task_log_path)
+                            if last_crop_mtime is None or curr_m != last_crop_mtime or curr_s != last_crop_size:
+                                last_crop_mtime = curr_m
+                                last_crop_size = curr_s
+                                last_crop_progress = time.time()
+                        except Exception:
+                            pass
+
+                    now_c = time.time()
+                    time_no_prog_crop = now_c - last_crop_progress
+                    total_crop_elapsed = now_c - sub_crop_start
+
+                    if time_no_prog_crop > no_prog_limit and proc.poll() is None:
+                        print(f"🛑 [Task {task_id}] Ausência de progresso no crop por {int(time_no_prog_crop)}s! Matando...")
                         proc.kill()
                         proc.wait()
-                        timed_out = True
+                        timed_out_crop = True
+                        crop_timeout_reason = f"ausência de novos logs por {no_prog_limit}s"
                         break
+
+                    if total_crop_elapsed > max_total_limit and proc.poll() is None:
+                        print(f"🛑 [Task {task_id}] Teto de segurança no crop excedido ({max_total_limit}s)! Matando...")
+                        proc.kill()
+                        proc.wait()
+                        timed_out_crop = True
+                        crop_timeout_reason = f"teto absoluto de segurança de {max_total_limit}s excedido"
+                        break
+
                     try:
                         if os.path.exists(task_log_path):
                             with open(task_log_path, "r", encoding="utf-8", errors="ignore") as rf:
                                 lines = [ln.strip() for ln in rf.readlines() if ln.strip()]
                                 if lines:
                                     TASKS[task_id]["message"] = f"GPU T4 (Segurança): {lines[-1][-45:]}"
+                                    for l in reversed(lines[-15:]):
+                                        m_tqdm = TQDM_REGEX.search(l)
+                                        if m_tqdm:
+                                            c_cur, c_tot, _, c_eta = m_tqdm.groups()
+                                            TASKS[task_id]["step_current"] = int(c_cur)
+                                            TASKS[task_id]["step_total"] = int(c_tot)
+                                            TASKS[task_id]["eta"] = c_eta
+                                            TASKS[task_id]["progress_pct"] = round((int(c_cur) / int(c_tot)) * 100, 1) if int(c_tot) > 0 else 0
+                                            break
                     except Exception:
                         pass
+
                 TASKS[task_id]["proc_alive"] = False
 
-            if timed_out:
+            if timed_out_crop:
                 TASKS[task_id]["finished_at"] = time.time()
                 tail_lines = get_log_tail(task_log_path, 15)
                 tail_str = "\n".join(tail_lines) if tail_lines else ""
-                err_msg = f"Tempo limite de {WORKER_TIMEOUT_S}s excedido no SadTalker (modo crop).\nÚltimos logs:\n{tail_str}"
+                err_msg = f"Tempo limite excedido no SadTalker modo crop ({crop_timeout_reason}).\nÚltimos logs:\n{tail_str}"
                 TASKS[task_id]["status"] = "error"
                 TASKS[task_id]["error"] = err_msg
-                TASKS[task_id]["message"] = f"Timeout de {WORKER_TIMEOUT_S}s no SadTalker"
+                TASKS[task_id]["message"] = f"Timeout no SadTalker modo crop ({crop_timeout_reason})"
                 print(f"❌ [Task {task_id}] {err_msg}")
                 return
 
@@ -448,21 +537,29 @@ def generate_neural_video():
 
         aspect_ratio = request.form.get('aspect_ratio', 'original').lower()
         keep_full = request.form.get('keep_full', 'true').lower() in ('true', '1', 'yes')
+        quality = request.form.get('quality', 'high').lower().strip()
+        if quality not in ('fast', 'high'):
+            quality = 'high'
 
         TASKS[task_id] = {
             "task_id": task_id,
             "status": "started",
             "stage": "init",
+            "quality": quality,
             "message": "Iniciando renderização neural na superplaca T4...",
             "started_at": time.time(),
             "finished_at": None,
             "proc_alive": False,
+            "progress_pct": 0,
+            "step_current": None,
+            "step_total": None,
+            "eta": None,
             "log_path": os.path.join(work_dir, "task_render.log")
         }
 
         t = threading.Thread(
             target=background_video_worker,
-            args=(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full),
+            args=(task_id, work_dir, image_path, audio_path, aspect_ratio, keep_full, quality),
             daemon=True
         )
         t.start()
@@ -493,6 +590,26 @@ def task_status(task_id):
 
     log_tail = get_log_tail(task.get("log_path"), 15)
 
+    progress_pct = task.get("progress_pct", 0)
+    step_current = task.get("step_current")
+    step_total = task.get("step_total")
+    eta = task.get("eta")
+
+    if step_current is None and log_tail:
+        for l in reversed(log_tail):
+            m_tqdm = TQDM_REGEX.search(l)
+            if m_tqdm:
+                c_cur, c_tot, _, c_eta = m_tqdm.groups()
+                step_current = int(c_cur)
+                step_total = int(c_tot)
+                eta = c_eta
+                progress_pct = round((step_current / step_total) * 100, 1) if step_total > 0 else 0
+                break
+
+    if task.get("status") == "completed":
+        progress_pct = 100
+        eta = "00:00"
+
     resp = {
         "success": True,
         "task_id": task_id,
@@ -500,6 +617,11 @@ def task_status(task_id):
         "message": task.get("message", ""),
         "elapsed_s": elapsed_s,
         "stage": task.get("stage", "init"),
+        "quality": task.get("quality", "high"),
+        "progress_pct": progress_pct,
+        "step_current": step_current,
+        "step_total": step_total,
+        "eta": eta,
         "log_tail": log_tail,
         "proc_alive": bool(task.get("proc_alive", False))
     }

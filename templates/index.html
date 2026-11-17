@@ -1394,6 +1394,18 @@
           </div>
         </div>
 
+        <!-- Seletor de Qualidade: Rápido (256) / Alta (512) -->
+        <div style="margin-bottom: 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <label for="qualitySelect" style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); display: block;">⚡ Qualidade: Rápido (256) / Alta (512)</label>
+            <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">Alta (512) padrão nítido · Rápido (256) até 4x mais rápido</span>
+          </div>
+          <select id="qualitySelect" style="background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.82rem; font-weight: 600; padding: 7px 12px; border-radius: var(--radius-sm); outline: none; cursor: pointer;">
+            <option value="high" selected>Alta (512)</option>
+            <option value="fast">Rápido (256)</option>
+          </select>
+        </div>
+
         <!-- Botão de Ação -->
         <button type="submit" id="submitBtn" class="btn-submit-main">
           <svg class="icon-md" width="22" height="22" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
@@ -1853,7 +1865,250 @@
         } catch(e) {}
       }
 
-            form.addEventListener('submit', async (e) => {
+            // 5 & 6. Atualização real dos chips e barra de progresso combinando etapa e tqdm
+      function applyGpuStage(stage, elapsed_s, message, logTail, progress_pct, step_current, step_total, eta) {
+        const chips = [st1, st2, st3, st4, st5];
+        chips.forEach(c => { if (c) c.classList.remove('active', 'done'); });
+
+        const normStage = (stage || 'init').toLowerCase();
+        let basePct = 10;
+        let rangeSpan = 15;
+
+        if (normStage === 'init' || normStage === 'started') {
+          basePct = 5;
+          rangeSpan = 10;
+          if (st1) st1.classList.add('active');
+        } else if (normStage === '3dmm') {
+          basePct = 15;
+          rangeSpan = 15;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('active');
+        } else if (normStage === 'audio2exp') {
+          basePct = 30;
+          rangeSpan = 15;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('active');
+        } else if (normStage === 'facerender') {
+          basePct = 45;
+          rangeSpan = 40;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('active');
+        } else if (normStage === 'paste') {
+          basePct = 85;
+          rangeSpan = 10;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('done');
+          if (st4) st4.classList.add('active');
+        } else if (normStage === 'encode') {
+          basePct = 95;
+          rangeSpan = 4;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('done');
+          if (st4) st4.classList.add('done');
+          if (st5) st5.classList.add('active');
+        } else if (normStage === 'done') {
+          basePct = 100;
+          rangeSpan = 0;
+          chips.forEach(c => { if (c) c.classList.add('done'); });
+        }
+
+        let pct = basePct;
+        if (normStage !== 'done' && progress_pct != null && progress_pct > 0) {
+          const p = Math.min(Math.max(parseFloat(progress_pct), 0), 100);
+          pct = Math.round(basePct + (rangeSpan * (p / 100)));
+        }
+        pct = Math.min(Math.max(pct, 5), 100);
+
+        progressBarFillEl.style.width = `${pct}%`;
+        progressPctLabel.textContent = `${pct}%`;
+
+        const m = Math.floor((elapsed_s || 0) / 60);
+        const s = Math.floor((elapsed_s || 0) % 60);
+        const timeStr = `${m}m ${s < 10 ? '0' : ''}${s}s`;
+
+        const stageNames = {
+          init: 'Inicialização',
+          started: 'Inicialização',
+          '3dmm': '1. Mapeamento 3D',
+          audio2exp: '2. Fonemas e Expressões',
+          facerender: '3. Animação Facial',
+          paste: '4. Mixagem / Resolução',
+          encode: '5. Codificação MP4',
+          done: 'Concluído'
+        };
+        const stageName = stageNames[normStage] || normStage.toUpperCase();
+
+        const parts = [`Etapa: ${stageName}`];
+        if (step_current != null && step_total != null) {
+          parts.push(`passo ${step_current}/${step_total}`);
+        }
+        parts.push(`tempo decorrido: ${timeStr}`);
+        if (eta) {
+          parts.push(`restante ~${eta}`);
+        }
+        const statusLine = parts.join(' · ');
+
+        progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ ${statusLine}</span>${message ? ` - <span style="color:#94a3b8; font-size:0.75rem;">${message}</span>` : ''}`;
+
+        const logBox = document.getElementById('gpuLogTailBox');
+        if (logBox && logTail && logTail.length) {
+          logBox.style.display = 'block';
+          logBox.style.borderColor = 'var(--border-subtle)';
+          logBox.textContent = logTail.slice(-4).join('\n');
+        }
+      }
+
+      function handleSuccessVideo(videoFinalUrl, outFilename, sizeMb, elapsed_s = 0, logTail = []) {
+        applyGpuStage('done', elapsed_s, '🎉 Vídeo 3D gerado com sucesso pelo Motor GPU!', logTail, 100);
+        progressBarFillEl.style.width = '100%';
+        progressBarFillEl.style.background = 'linear-gradient(90deg, #10b981, #06b6d4)';
+        progressPctLabel.textContent = '100%';
+
+        const spinEl = document.querySelector('.loader-ring');
+        if (spinEl) spinEl.style.display = 'none';
+        const strongEl = document.querySelector('.progress-title-spin strong');
+        if (strongEl) {
+          strongEl.innerHTML = '&#127881; Vídeo Concluído com Sucesso! <span style="color:#10b981; font-weight:800;">(100%)</span>';
+        }
+
+        submitBtn.disabled = false;
+        submitBtnText.textContent = '✨ Gerar Outro Vídeo';
+
+        showResult(videoFinalUrl, outFilename);
+
+        saveVideoToLocalGallery({
+          url: videoFinalUrl,
+          httpUrl: videoFinalUrl.startsWith('data:') ? '' : videoFinalUrl,
+          filename: outFilename,
+          created_at: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          size_mb: sizeMb || 3.5
+        });
+        loadGallery();
+      }
+
+      // 4 & 7. Polling assíncrono sem limite de 300 polls e com persistência/retomada no localStorage
+      async function runGpuTaskPolling(taskId, cleanGpuUrl) {
+        if (!taskId || !cleanGpuUrl) return;
+
+        progressBox.classList.remove('hidden');
+        progressBox.style.display = 'block';
+        submitBtn.disabled = true;
+        submitBtnText.textContent = 'Renderizando na GPU T4...';
+
+        const spinEl = document.querySelector('.loader-ring');
+        if (spinEl) spinEl.style.display = 'inline-block';
+        const strongEl = document.querySelector('.progress-title-spin strong');
+        if (strongEl) {
+          strongEl.innerHTML = 'IA Processando Vídeo Neural 3D... <span style="color:#6366f1; font-weight:800;">(GPU Colab)</span>';
+        }
+
+        localStorage.setItem('studio_active_task_id', taskId);
+        localStorage.setItem('studio_active_task_url', cleanGpuUrl);
+
+        let isDone = false;
+        let consecutiveNetErrors = 0;
+        let lastStage = 'init';
+        let lastElapsedS = 0;
+        let lastLogTail = [];
+
+        try {
+          while (!isDone) {
+            await new Promise(r => setTimeout(r, 3000));
+
+            let pollRes;
+            try {
+              pollRes = await fetch(`${cleanGpuUrl}/api/task_status/${taskId}`);
+              consecutiveNetErrors = 0;
+            } catch(e) {
+              consecutiveNetErrors++;
+              console.warn(`Falha de rede no polling (${consecutiveNetErrors}/4):`, e);
+              if (consecutiveNetErrors >= 4) {
+                let healthOk = false;
+                try {
+                  const hRes = await fetch(`${cleanGpuUrl}/api/health`, { method: 'GET' });
+                  healthOk = hRes.ok;
+                } catch(he) {
+                  healthOk = false;
+                }
+                if (!healthOk) {
+                  throw new Error('Conexão com o Colab/túnel perdida.');
+                }
+              }
+              progressStatusMsg.innerHTML = `<span style="color:#fbbf24;">Aguardando reconexão da GPU (${consecutiveNetErrors}/4)...</span>`;
+              continue;
+            }
+
+            if (pollRes.status === 404) {
+              localStorage.removeItem('studio_active_task_id');
+              localStorage.removeItem('studio_active_task_url');
+              throw new Error('O Colab reiniciou e perdeu a tarefa; reconecte.');
+            }
+
+            if (!pollRes.ok) {
+              const errText = await pollRes.text().catch(() => '');
+              throw new Error(`Erro HTTP ${pollRes.status} no polling: ${errText.slice(0, 100)}`);
+            }
+
+            const taskState = await pollRes.json();
+            lastStage = taskState.stage || lastStage;
+            lastElapsedS = taskState.elapsed_s != null ? taskState.elapsed_s : lastElapsedS;
+            if (taskState.log_tail && taskState.log_tail.length) {
+              lastLogTail = taskState.log_tail;
+            }
+
+            if (taskState.status === 'processing' || taskState.status === 'started') {
+              applyGpuStage(
+                taskState.stage || 'init',
+                taskState.elapsed_s || 0,
+                taskState.message,
+                taskState.log_tail,
+                taskState.progress_pct,
+                taskState.step_current,
+                taskState.step_total,
+                taskState.eta
+              );
+            } else if (taskState.status === 'completed') {
+              isDone = true;
+              localStorage.removeItem('studio_active_task_id');
+              localStorage.removeItem('studio_active_task_url');
+              const videoFinalUrl = taskState.video_url.startsWith('http') ? taskState.video_url : `${cleanGpuUrl}${taskState.video_url}`;
+              const outFilename = taskState.filename || 'video_neural_ia.mp4';
+              handleSuccessVideo(videoFinalUrl, outFilename, taskState.size_mb, lastElapsedS, lastLogTail);
+              return;
+            } else if (taskState.status === 'error') {
+              isDone = true;
+              localStorage.removeItem('studio_active_task_id');
+              localStorage.removeItem('studio_active_task_url');
+              const tailMsg = (taskState.log_tail && taskState.log_tail.length) ? `\nÚltimos logs:\n${taskState.log_tail.join('\n')}` : '';
+              throw new Error((taskState.error || 'Erro interno na renderização neural') + tailMsg);
+            }
+          }
+        } catch (gpuErr) {
+          localStorage.removeItem('studio_active_task_id');
+          localStorage.removeItem('studio_active_task_url');
+          submitBtn.disabled = false;
+          submitBtnText.textContent = 'Gerar Vídeo Agora';
+          progressBarFillEl.style.width = '100%';
+          progressBarFillEl.style.background = '#ef4444';
+          progressPctLabel.textContent = 'Erro';
+          progressStatusMsg.innerHTML = `<span style="color:#ef4444; font-weight:700;">❌ ${gpuErr.message.split('\n')[0]}</span>`;
+
+          const logBox = document.getElementById('gpuLogTailBox');
+          if (logBox) {
+            logBox.style.display = 'block';
+            logBox.style.borderColor = '#ef4444';
+            logBox.textContent = gpuErr.message;
+          }
+          console.error('Falha na renderização neural:', gpuErr);
+          alert('❌ ' + gpuErr.message);
+        }
+      }
+
+      form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const activeTab = document.querySelector('.tab-trigger.active').dataset.target;
         const scriptText = document.getElementById('scriptText').value.trim();
@@ -1930,6 +2185,11 @@
           const keepFullVal = keepFullCheck ? keepFullCheck.checked : true;
           neuralFormData.append('keep_full', keepFullVal ? 'true' : 'false');
 
+          // 6. Qualidade selecionada: fast (256px) / high (512px)
+          const qualityEl = document.getElementById('qualitySelect');
+          const chosenQuality = qualityEl ? qualityEl.value : 'high';
+          neuralFormData.append('quality', chosenQuality);
+
           if (activeTab === 'tabText') {
             neuralFormData.append('script_text', scriptText);
             neuralFormData.append('voice', document.getElementById('voiceSelect').value);
@@ -1938,66 +2198,6 @@
           }
           neuralFormData.append('use_enhancer', 'true');
           neuralFormData.append('still_mode', 'true');
-
-          // 6. Atualização real dos 5 chips conforme o stage do SadTalker
-          function applyGpuStage(stage, elapsed_s, message, logTail) {
-            const chips = [st1, st2, st3, st4, st5];
-            chips.forEach(c => { if (c) c.classList.remove('active', 'done'); });
-
-            let pct = 10;
-            const normStage = (stage || 'init').toLowerCase();
-
-            if (normStage === 'init' || normStage === 'started') {
-              pct = 15;
-              if (st1) st1.classList.add('active');
-            } else if (normStage === '3dmm') {
-              pct = 30;
-              if (st1) st1.classList.add('done');
-              if (st2) st2.classList.add('active');
-            } else if (normStage === 'audio2exp') {
-              pct = 50;
-              if (st1) st1.classList.add('done');
-              if (st2) st2.classList.add('done');
-              if (st3) st3.classList.add('active');
-            } else if (normStage === 'facerender') {
-              pct = 70;
-              if (st1) st1.classList.add('done');
-              if (st2) st2.classList.add('done');
-              if (st3) st3.classList.add('active');
-            } else if (normStage === 'paste') {
-              pct = 85;
-              if (st1) st1.classList.add('done');
-              if (st2) st2.classList.add('done');
-              if (st3) st3.classList.add('done');
-              if (st4) st4.classList.add('active');
-            } else if (normStage === 'encode') {
-              pct = 95;
-              if (st1) st1.classList.add('done');
-              if (st2) st2.classList.add('done');
-              if (st3) st3.classList.add('done');
-              if (st4) st4.classList.add('done');
-              if (st5) st5.classList.add('active');
-            } else if (normStage === 'done') {
-              pct = 100;
-              chips.forEach(c => { if (c) c.classList.add('done'); });
-            }
-
-            progressBarFillEl.style.width = `${pct}%`;
-            progressPctLabel.textContent = `${pct}%`;
-
-            const m = Math.floor((elapsed_s || 0) / 60);
-            const s = Math.floor((elapsed_s || 0) % 60);
-            const timeStr = `${m}m ${s < 10 ? '0' : ''}${s}s`;
-            const stageLabel = normStage.toUpperCase();
-            progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ [${timeStr}] Etapa: ${stageLabel}</span> - <span style="color:#e2e8f0;">${message || ''}</span>`;
-
-            const logBox = document.getElementById('gpuLogTailBox');
-            if (logBox && logTail && logTail.length) {
-              logBox.style.display = 'block';
-              logBox.style.borderColor = 'var(--border-subtle)';
-              logBox.textContent = logTail.slice(-4).join('\n');
-            }
-          }
 
           try {
             let cleanGpuUrl = (savedGpuUrl || '').trim().replace(/\/+$/, '');
@@ -2021,112 +2221,9 @@
               throw new Error(initData.error || 'A GPU não iniciou a tarefa');
             }
 
-            let lastStage = 'init';
-            let lastElapsedS = 0;
-            let lastLogTail = [];
-
-            // Função auxiliar de sucesso e entrega do vídeo
-            const handleSuccessVideo = (videoFinalUrl, outFilename, sizeMb) => {
-              applyGpuStage('done', lastElapsedS, '🎉 Vídeo 3D gerado com sucesso pelo Motor GPU!', lastLogTail);
-              progressBarFillEl.style.width = '100%';
-              progressPctLabel.textContent = '100%';
-
-              if (spinEl) spinEl.style.display = 'none';
-              if (strongEl) {
-                strongEl.innerHTML = '&#127881; Vídeo Concluído com Sucesso! <span style="color:#10b981; font-weight:800;">(100%)</span>';
-              }
-
-              submitBtn.disabled = false;
-              submitBtnText.textContent = '✨ Gerar Outro Vídeo';
-
-              // 1. Exibe player principal
-              showResult(videoFinalUrl, outFilename);
-
-              // 2. Persiste na galeria
-              saveVideoToLocalGallery({
-                url: videoFinalUrl,
-                httpUrl: videoFinalUrl.startsWith('data:') ? '' : videoFinalUrl,
-                filename: outFilename,
-                created_at: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-                size_mb: sizeMb || 3.5
-              });
-              loadGallery();
-            };
-
-            let consecutiveNetErrors = 0;
-
-            // Polling assíncrono com telemetria real (v7.2)
             if (initData.async && initData.task_id) {
-              const taskId = initData.task_id;
-              let isDone = false;
-              let attempts = 0;
-              const maxAttempts = 300; // até 15 minutos
-
-              while (!isDone && attempts < maxAttempts) {
-                await new Promise(r => setTimeout(r, 3000));
-                attempts++;
-
-                let pollRes;
-                try {
-                  pollRes = await fetch(`${cleanGpuUrl}/api/task_status/${taskId}`);
-                  consecutiveNetErrors = 0;
-                } catch(e) {
-                  consecutiveNetErrors++;
-                  console.warn(`Falha de rede no polling (${consecutiveNetErrors}/4):`, e);
-                  if (consecutiveNetErrors >= 4) {
-                    let healthOk = false;
-                    try {
-                      const hRes = await fetch(`${cleanGpuUrl}/api/health`, { method: 'GET' });
-                      healthOk = hRes.ok;
-                    } catch(he) {
-                      healthOk = false;
-                    }
-                    if (!healthOk) {
-                      throw new Error('Conexão com o Colab/túnel perdida.');
-                    }
-                  }
-                  progressStatusMsg.innerHTML = `<span style="color:#fbbf24;">Aguardando reconexão da GPU (${consecutiveNetErrors}/4)...</span>`;
-                  continue;
-                }
-
-                // 7. 404 Tarefa não encontrada -> falhar na hora
-                if (pollRes.status === 404) {
-                  throw new Error('O Colab reiniciou e perdeu a tarefa; reconecte.');
-                }
-
-                if (!pollRes.ok) {
-                  const errText = await pollRes.text().catch(() => '');
-                  throw new Error(`Erro HTTP ${pollRes.status} no polling: ${errText.slice(0, 100)}`);
-                }
-
-                const taskState = await pollRes.json();
-                lastStage = taskState.stage || lastStage;
-                lastElapsedS = taskState.elapsed_s != null ? taskState.elapsed_s : lastElapsedS;
-                if (taskState.log_tail && taskState.log_tail.length) {
-                  lastLogTail = taskState.log_tail;
-                }
-
-                if (taskState.status === 'processing' || taskState.status === 'started') {
-                  applyGpuStage(taskState.stage || 'init', taskState.elapsed_s || 0, taskState.message, taskState.log_tail);
-                } else if (taskState.status === 'completed') {
-                  isDone = true;
-                  const videoFinalUrl = taskState.video_url.startsWith('http') ? taskState.video_url : `${cleanGpuUrl}${taskState.video_url}`;
-                  const outFilename = taskState.filename || 'video_neural_ia.mp4';
-                  handleSuccessVideo(videoFinalUrl, outFilename, taskState.size_mb);
-                  return;
-                } else if (taskState.status === 'error') {
-                  const tailMsg = (taskState.log_tail && taskState.log_tail.length) ? `\nÚltimos logs:\n${taskState.log_tail.join('\n')}` : '';
-                  throw new Error((taskState.error || 'Erro interno na renderização neural') + tailMsg);
-                }
-              }
-
-              // 8. Mensagem de timeout informando último stage e log_tail
-              if (!isDone) {
-                const tailMsg = lastLogTail.length ? `\nÚltimos logs:\n${lastLogTail.join('\n')}` : '';
-                const m = Math.floor(lastElapsedS / 60);
-                const s = Math.floor(lastElapsedS % 60);
-                throw new Error(`Tempo limite excedido na etapa "${lastStage}" após ${m}m ${s}s.${tailMsg}`);
-              }
+              await runGpuTaskPolling(initData.task_id, cleanGpuUrl);
+              return;
             } else if (initData.video_url) {
               const videoFinalUrl = initData.video_url.startsWith('http') ? initData.video_url : `${cleanGpuUrl}${initData.video_url}`;
               const outFilename = initData.filename || 'video_neural_ia.mp4';
@@ -2340,6 +2437,14 @@
       // Verifica no carregamento da página
       if (savedGpuUrl) {
         verifyGpuConnection(savedGpuUrl, false);
+      }
+
+      // 7. Retoma polling se houver tarefa pendente salva no localStorage ao recarregar a página
+      const pendingTaskId = localStorage.getItem('studio_active_task_id');
+      const pendingTaskUrl = localStorage.getItem('studio_active_task_url') || savedGpuUrl;
+      if (pendingTaskId && pendingTaskUrl) {
+        console.log('🔄 Retomando polling da tarefa salva:', pendingTaskId);
+        runGpuTaskPolling(pendingTaskId, pendingTaskUrl);
       }
 
       loadPresets();
