@@ -690,6 +690,7 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
             append_task_log(task_log_path, "🎵 Mixando áudio no vídeo final com ffmpeg (sem sincronia labial)...")
             cmd_audio = [
                 "ffmpeg", "-y", "-i", task_out_mp4, "-i", audio_path,
+                "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac", "-shortest",
                 final_video_path
             ]
