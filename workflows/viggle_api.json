@@ -1,5 +1,6 @@
 {
   "_instructions": {
+    "status": "ESBOÇO NÃO TESTADO: será substituído pelo export real do ComfyUI",
     "description": "Exemplo de Workflow do Viggle-Animate (MiniMax-H3 ref2va) no formato ComfyUI API Prompt.",
     "export_guide": "Para exportar seu workflow final testado na interface do ComfyUI: 1) Abra as configurações (ícone de engrenagem no canto superior direito); 2) Marque 'Enable Dev mode Options'; 3) Clique no botão 'Save (API format)'; 4) Salve o arquivo nesta pasta como 'workflows/viggle_api.json'.",
     "required_node_titles": {
@@ -84,11 +85,10 @@
   },
   "8": {
     "inputs": {
-      "width": 512,
-      "height": 512,
+      "width": 0,
+      "height": 0,
       "length": 124,
-      "batch_size": 1,
-      "images": ["2", 0],
+      "cond_video": ["2", 0],
       "ref_image": ["1", 0],
       "text_cond": ["6", 0],
       "vae": ["7", 0]

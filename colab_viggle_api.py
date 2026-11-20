@@ -97,13 +97,72 @@ def append_task_log(log_path, message):
     except Exception:
         pass
 
+def validate_workflow_against_comfyui(workflow_path, comfy_url):
+    problems = []
+    if not os.path.exists(workflow_path):
+        return False, [f"Arquivo de workflow não encontrado: {workflow_path}"]
+
+    try:
+        with open(workflow_path, "r", encoding="utf-8") as f:
+            raw_wf = json.load(f)
+    except Exception as e:
+        return False, [f"Erro ao ler JSON do workflow: {str(e)}"]
+
+    workflow = {k: v for k, v in raw_wf.items() if isinstance(v, dict) and "class_type" in v}
+    if not workflow:
+        return False, ["Nenhum nó válido com 'class_type' encontrado no workflow"]
+
+    # 1. Exigir os 3 títulos obrigatórios: INPUT_IMAGE, INPUT_VIDEO e SEED
+    required_titles = ["INPUT_IMAGE", "INPUT_VIDEO", "SEED"]
+    found_titles = set()
+    for nid, node in workflow.items():
+        title = node.get("_meta", {}).get("title")
+        if title:
+            found_titles.add(title)
+
+    for req_t in required_titles:
+        if req_t not in found_titles:
+            problems.append(f"Título obrigatório '{req_t}' não encontrado em nenhum nó do workflow (_meta.title)")
+
+    # 2. Consultar GET /object_info no ComfyUI
+    object_info = {}
+    try:
+        req = urllib.request.Request(f"{comfy_url}/object_info", headers={"User-Agent": "StudioVideoAI"})
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            object_info = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        problems.append(f"Não foi possível consultar /object_info no ComfyUI ({comfy_url}): {str(e)}")
+        return False, problems
+
+    # 3. Para cada nó do workflow: (a) class_type existe; (b) entradas required presentes
+    for nid, node in workflow.items():
+        ctype = node.get("class_type")
+        if not ctype:
+            problems.append(f"Nó [{nid}] não possui 'class_type'")
+            continue
+
+        if ctype not in object_info:
+            problems.append(f"Nó [{nid}] ({ctype}): 'class_type' não existe no ComfyUI")
+            continue
+
+        node_info = object_info[ctype]
+        req_inputs = node_info.get("input", {}).get("required", {})
+        actual_inputs = node.get("inputs", {})
+
+        for req_key in req_inputs.keys():
+            if req_key not in actual_inputs:
+                problems.append(f"Nó [{nid}] ({ctype}): entrada obrigatória '{req_key}' ausente no workflow")
+
+    is_valid = (len(problems) == 0)
+    return is_valid, problems
+
 def check_environment_health():
     """
     ready=true só se:
     1. ComfyUI responder em /system_stats
     2. GPU tiver 22 GB ou mais de VRAM
     3. Existirem os 4 arquivos de modelo
-    4. workflows/viggle_api.json existir
+    4. workflows/viggle_api.json existir e for válido contra o ComfyUI (/object_info)
     """
     comfy_ok = False
     try:
@@ -133,7 +192,9 @@ def check_environment_health():
     ckpt_lora_ok = os.path.exists(LORA_MODEL_PATH)
     ckpt_text_cond_ok = os.path.exists(TEXT_COND_PATH)
     ckpt_vae_ok = os.path.exists(VAE_PATH)
-    workflow_ok = os.path.exists(WORKFLOW_API_PATH)
+    workflow_exists = os.path.exists(WORKFLOW_API_PATH)
+
+    wf_valid, wf_problems = validate_workflow_against_comfyui(WORKFLOW_API_PATH, COMFYUI_URL)
 
     ready = bool(
         comfy_ok and
@@ -143,7 +204,8 @@ def check_environment_health():
         ckpt_lora_ok and
         ckpt_text_cond_ok and
         ckpt_vae_ok and
-        workflow_ok
+        workflow_exists and
+        wf_valid
     )
 
     return {
@@ -156,7 +218,9 @@ def check_environment_health():
         "checkpoint_lora": ckpt_lora_ok,
         "checkpoint_text_cond": ckpt_text_cond_ok,
         "checkpoint_vae": ckpt_vae_ok,
-        "workflow_exists": workflow_ok,
+        "workflow_exists": workflow_exists,
+        "workflow_valid": wf_valid,
+        "workflow_problems": wf_problems,
         "gpu": gpu_name,
         "engine": "Viggle-Animate H3 (ComfyUI A100 Engine v1.0)",
         "bridge": "Studio Video AI Viggle Bridge v8.0"
@@ -179,6 +243,8 @@ def health():
         "checkpoint_text_cond": h["checkpoint_text_cond"],
         "checkpoint_vae": h["checkpoint_vae"],
         "workflow_exists": h["workflow_exists"],
+        "workflow_valid": h["workflow_valid"],
+        "workflow_problems": h["workflow_problems"],
         "gpu": h["gpu"],
         "engine": h["engine"],
         "bridge": h["bridge"]
@@ -435,8 +501,43 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
             headers={"Content-Type": "application/json"}
         )
 
-        with urllib.request.urlopen(req_prompt, timeout=10) as p_resp:
-            prompt_res = json.loads(p_resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req_prompt, timeout=10) as p_resp:
+                prompt_res = json.loads(p_resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as he:
+            err_body = ""
+            err_json = {}
+            try:
+                err_body = he.read().decode("utf-8")
+                err_json = json.loads(err_body)
+            except Exception:
+                pass
+
+            err_main = err_json.get("error", {})
+            if isinstance(err_main, dict):
+                base_msg = err_main.get("message") or err_main.get("type") or str(he)
+            else:
+                base_msg = str(err_main) or str(he)
+
+            node_errors = err_json.get("node_errors", {})
+            node_err_details = []
+            if isinstance(node_errors, dict):
+                for nid, nerr in node_errors.items():
+                    ctype = nerr.get("class_type", "Desconhecido")
+                    for e in nerr.get("errors", []):
+                        m = e.get("message", "Erro no nó")
+                        d = e.get("details", "")
+                        node_err_details.append(f"Nó {nid} ({ctype}): {m} [{d}]" if d else f"Nó {nid} ({ctype}): {m}")
+
+            if node_err_details:
+                full_msg = f"{base_msg} - Detalhes: {'; '.join(node_err_details)}"
+            elif err_body:
+                full_msg = f"{base_msg} - {err_body[:250]}"
+            else:
+                full_msg = f"Erro HTTP {he.code} ao enfileirar no ComfyUI: {he.reason}"
+
+            append_task_log(task_log_path, f"❌ Erro ao enviar prompt: {full_msg}")
+            raise RuntimeError(full_msg)
 
         prompt_id = prompt_res.get("prompt_id")
         if not prompt_id:
