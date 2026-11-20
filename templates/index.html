@@ -1406,39 +1406,22 @@
           </select>
         </div>
 
-        <!-- Seletor de Movimento: Natural / Estático / Copiar de vídeo -->
-        <div style="margin-bottom: 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px 14px;">
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-            <div>
-              <label for="motionSelect" style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); display: block;">🎭 Movimento: Natural / Estático / Copiar de vídeo</label>
-              <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">Natural (cabeça viva) · Estático (pose fixa) · Copiar de vídeo (ref)</span>
-            </div>
-            <select id="motionSelect" style="background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.82rem; font-weight: 600; padding: 7px 12px; border-radius: var(--radius-sm); outline: none; cursor: pointer;">
-              <option value="natural" selected>Natural</option>
-              <option value="still">Estático</option>
-              <option value="ref">Copiar de vídeo</option>
-            </select>
+        <!-- Campo Obrigatório: Vídeo de Movimento (MP4 de até 5 s) para Viggle-Animate -->
+        <div style="margin-bottom: 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px;">
+          <div style="margin-bottom: 8px;">
+            <label for="motionVideoInput" style="font-size: 0.88rem; font-weight: 700; color: var(--text-main); display: flex; align-items: center; justify-content: space-between;">
+              <span>🕺 Vídeo de movimento (MP4 de até 5 s)</span>
+              <span style="font-size: 0.68rem; color: #f87171; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); padding: 2px 6px; border-radius: 4px; font-weight: 800;">OBRIGATÓRIO</span>
+            </label>
+            <span style="font-size: 0.73rem; color: var(--text-muted); display: block; margin-top: 3px;">
+              Vídeo MP4 com o corpo/movimento de referência para transferir ao personagem (máx. 124 quadros / ~5 s).
+            </span>
           </div>
-
-          <!-- Campos opcionais: Estilo de pose (0-45) e Intensidade de expressão -->
-          <div id="motionExtraOptions" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.05); margin-top: 10px;">
-            <div>
-              <label for="poseStyleInput" style="font-size: 0.76rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">Estilo de Pose (0 a 45):</label>
-              <input type="number" id="poseStyleInput" min="0" max="45" value="0" style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.8rem; padding: 5px 8px; border-radius: var(--radius-sm); outline: none;">
-            </div>
-            <div>
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                <label for="expressionScaleSlider" style="font-size: 0.76rem; font-weight: 600; color: var(--text-muted);">Expressão Facial:</label>
-                <span id="expressionScaleLabel" style="font-size: 0.76rem; font-weight: 700; color: var(--accent);">1.3x</span>
-              </div>
-              <input type="range" id="expressionScaleSlider" min="0.8" max="1.6" step="0.05" value="1.3" style="width: 100%; accent-color: var(--primary);">
-            </div>
-          </div>
-
-          <!-- Upload de Vídeo de Referência (exibido apenas quando Copiar de vídeo) -->
-          <div id="refVideoGroup" style="display: none; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.05); margin-top: 10px;">
-            <label for="refVideoInput" style="font-size: 0.76rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">📹 Vídeo MP4 de Referência (pose e piscar):</label>
-            <input type="file" id="refVideoInput" accept="video/mp4,video/*" style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.8rem; padding: 6px 8px; border-radius: var(--radius-sm); outline: none;">
+          <input type="file" id="motionVideoInput" name="motion_video" accept="video/mp4,video/*" required style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-main); font-size: 0.82rem; padding: 8px 10px; border-radius: var(--radius-sm); outline: none; cursor: pointer;">
+          
+          <!-- Aviso informativo sobre áudio e sincronia -->
+          <div id="viggleAudioNotice" style="display: none; margin-top: 10px; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25); font-size: 0.74rem; color: #93c5fd;">
+            ℹ️ <strong>Aviso Viggle-Animate:</strong> O áudio inserido será mixado como trilha sonora. O motor transfere a movimentação corporal completa do vídeo (sem sincronia labial artificial).
           </div>
         </div>
 
@@ -1472,11 +1455,11 @@
         </div>
 
         <div class="steps-checklist">
-          <span class="step-badge-pill" id="st1">1. Voz IA</span>
-          <span class="step-badge-pill" id="st2">2. Fonemas</span>
-          <span class="step-badge-pill" id="st3">3. Animação Facial</span>
-          <span class="step-badge-pill" id="st4">4. Mixagem</span>
-          <span class="step-badge-pill" id="st5">5. Renderização</span>
+          <span class="step-badge-pill" id="st1">1. Mídia</span>
+          <span class="step-badge-pill" id="st2">2. ComfyUI</span>
+          <span class="step-badge-pill" id="st3">3. Difusão Viggle</span>
+          <span class="step-badge-pill" id="st4">4. VAE Decode</span>
+          <span class="step-badge-pill" id="st5">5. Vídeo Final</span>
         </div>
         <div id="gpuLogTailBox" style="display:none; margin-top:12px; font-family:Consolas, monospace; font-size:0.75rem; color:#94a3b8; background:rgba(0,0,0,0.4); border:1px solid var(--border-subtle); border-radius:6px; padding:8px 12px; max-height:110px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;"></div>
       </div>
@@ -1901,8 +1884,8 @@
         } catch(e) {}
       }
 
-            // 5 & 6. Atualização real dos chips e barra de progresso combinando etapa e tqdm
-      function applyGpuStage(stage, elapsed_s, message, logTail, progress_pct, step_current, step_total, eta) {
+            // 5 & 6. Atualização real dos chips e barra de progresso combinando etapa e telemetria Viggle
+      function applyGpuStage(stage, elapsed_s, message, logTail, progress_pct, step_current, step_total, eta, aviso_audio = false) {
         const chips = [st1, st2, st3, st4, st5];
         chips.forEach(c => { if (c) c.classList.remove('active', 'done'); });
 
@@ -1914,6 +1897,42 @@
           basePct = 5;
           rangeSpan = 10;
           if (st1) st1.classList.add('active');
+        } else if (normStage === 'upload') {
+          basePct = 15;
+          rangeSpan = 10;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('active');
+        } else if (normStage === 'queued') {
+          basePct = 25;
+          rangeSpan = 15;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('active');
+        } else if (normStage === 'sampling' || normStage === 'facerender') {
+          basePct = 40;
+          rangeSpan = 40;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('active');
+        } else if (normStage === 'decoding' || normStage === 'paste') {
+          basePct = 80;
+          rangeSpan = 12;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('done');
+          if (st4) st4.classList.add('active');
+        } else if (normStage === 'saving' || normStage === 'encode') {
+          basePct = 92;
+          rangeSpan = 7;
+          if (st1) st1.classList.add('done');
+          if (st2) st2.classList.add('done');
+          if (st3) st3.classList.add('done');
+          if (st4) st4.classList.add('done');
+          if (st5) st5.classList.add('active');
+        } else if (normStage === 'done') {
+          basePct = 100;
+          rangeSpan = 0;
+          chips.forEach(c => { if (c) c.classList.add('done'); });
         } else if (normStage === '3dmm') {
           basePct = 15;
           rangeSpan = 15;
@@ -1925,31 +1944,6 @@
           if (st1) st1.classList.add('done');
           if (st2) st2.classList.add('done');
           if (st3) st3.classList.add('active');
-        } else if (normStage === 'facerender') {
-          basePct = 45;
-          rangeSpan = 40;
-          if (st1) st1.classList.add('done');
-          if (st2) st2.classList.add('done');
-          if (st3) st3.classList.add('active');
-        } else if (normStage === 'paste') {
-          basePct = 85;
-          rangeSpan = 10;
-          if (st1) st1.classList.add('done');
-          if (st2) st2.classList.add('done');
-          if (st3) st3.classList.add('done');
-          if (st4) st4.classList.add('active');
-        } else if (normStage === 'encode') {
-          basePct = 95;
-          rangeSpan = 4;
-          if (st1) st1.classList.add('done');
-          if (st2) st2.classList.add('done');
-          if (st3) st3.classList.add('done');
-          if (st4) st4.classList.add('done');
-          if (st5) st5.classList.add('active');
-        } else if (normStage === 'done') {
-          basePct = 100;
-          rangeSpan = 0;
-          chips.forEach(c => { if (c) c.classList.add('done'); });
         }
 
         let pct = basePct;
@@ -1967,14 +1961,19 @@
         const timeStr = `${m}m ${s < 10 ? '0' : ''}${s}s`;
 
         const stageNames = {
-          init: 'Inicialização',
+          init: 'Preparação de Mídia',
           started: 'Inicialização',
+          upload: '1. Envio para ComfyUI',
+          queued: '2. Fila / Carregando Pesos',
+          sampling: '3. Difusão Viggle (DMD 4-step)',
+          decoding: '4. Decodificação VAE de Vídeo',
+          saving: '5. Mixagem e Vídeo Final',
+          done: 'Concluído',
           '3dmm': '1. Mapeamento 3D',
           audio2exp: '2. Fonemas e Expressões',
           facerender: '3. Animação Facial',
           paste: '4. Mixagem / Resolução',
-          encode: '5. Codificação MP4',
-          done: 'Concluído'
+          encode: '5. Codificação MP4'
         };
         const stageName = stageNames[normStage] || normStage.toUpperCase();
 
@@ -1988,7 +1987,12 @@
         }
         const statusLine = parts.join(' · ');
 
-        progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ ${statusLine}</span>${message ? ` - <span style="color:#94a3b8; font-size:0.75rem;">${message}</span>` : ''}`;
+        let audioNote = '';
+        if (aviso_audio) {
+          audioNote = `<div style="margin-top: 4px; font-size: 0.74rem; color: #fde047; font-weight: 600;">🎵 Áudio mixado como trilha sonora (o Viggle transfere movimento corporal, sem sincronia labial).</div>`;
+        }
+
+        progressStatusMsg.innerHTML = `<span style="color:#60a5fa; font-weight:600;">⚡ ${statusLine}</span>${message ? ` - <span style="color:#94a3b8; font-size:0.75rem;">${message}</span>` : ''}${audioNote}`;
 
         const logBox = document.getElementById('gpuLogTailBox');
         if (logBox && logTail && logTail.length) {
@@ -2133,7 +2137,8 @@
                 taskState.progress_pct,
                 taskState.step_current,
                 taskState.step_total,
-                taskState.eta
+                taskState.eta,
+                Boolean(taskState.aviso_audio)
               );
             } else if (taskState.status === 'completed') {
               isDone = true;
@@ -2261,25 +2266,16 @@
           const chosenQuality = qualityEl ? qualityEl.value : 'high';
           neuralFormData.append('quality', chosenQuality);
 
-          // 1. Movimento: Natural / Estático / Copiar de vídeo
-          const motionEl = document.getElementById('motionSelect');
-          const chosenMotion = motionEl ? motionEl.value : 'natural';
-          neuralFormData.append('motion', chosenMotion);
-
-          const poseStyleEl = document.getElementById('poseStyleInput');
-          const poseStyleVal = poseStyleEl ? parseInt(poseStyleEl.value, 10) : 0;
-          neuralFormData.append('pose_style', isNaN(poseStyleVal) ? '0' : String(Math.max(0, Math.min(45, poseStyleVal))));
-
-          const expScaleEl = document.getElementById('expressionScaleSlider');
-          const expScaleVal = expScaleEl ? parseFloat(expScaleEl.value) : 1.3;
-          neuralFormData.append('expression_scale', isNaN(expScaleVal) ? '1.3' : String(Math.max(0.8, Math.min(1.6, expScaleVal))));
-
-          if (chosenMotion === 'ref') {
-            const refVidInput = document.getElementById('refVideoInput');
-            if (refVidInput && refVidInput.files && refVidInput.files[0]) {
-              neuralFormData.append('ref_video', refVidInput.files[0]);
-            }
+          // Vídeo de movimento (obrigatório para o motor Viggle-Animate)
+          const motionVidInput = document.getElementById('motionVideoInput');
+          if (!motionVidInput || !motionVidInput.files || !motionVidInput.files[0]) {
+            submitBtn.disabled = false;
+            submitBtnText.textContent = 'Gerar Vídeo Agora';
+            progressBox.classList.add('hidden');
+            alert('Por favor, selecione um arquivo de vídeo de movimento (MP4 de até 5 s).');
+            return;
           }
+          neuralFormData.append('motion_video', motionVidInput.files[0]);
 
           if (activeTab === 'tabText') {
             neuralFormData.append('script_text', scriptText);
@@ -2431,17 +2427,19 @@
             const data = await res.json();
             if (data.ready === true) {
               gpuStatusDot.classList.add('connected');
-              gpuStatusLabel.textContent = '🟢 Motor GPU Ativo (NVIDIA T4)';
+              gpuStatusLabel.textContent = `🟢 Motor GPU Ativo (${data.gpu || 'NVIDIA A100'})`;
               if (notify && gpuFeedbackBox) {
                 gpuFeedbackBox.className = 'gpu-feedback-box success';
-                gpuFeedbackBox.textContent = `Conectado com sucesso! ${data.engine || 'SadTalker + GFPGAN'}`;
+                gpuFeedbackBox.textContent = `Conectado com sucesso! ${data.engine || 'Viggle-Animate'}`;
               }
               return true;
             } else {
               gpuStatusDot.classList.remove('connected');
               gpuStatusLabel.textContent = '🔴 Colab sem GPU/modelo';
-              const checks = ['cuda_available', 'inference_script', 'checkpoint_512', 'checkpoint_mapping', 'checkpoint_bfm'];
-              const falseFields = checks.filter(field => !data[field]);
+              const checks = (data.engine && data.engine.includes('Viggle'))
+                ? ['comfy_online', 'cuda_available', 'vram_ok', 'checkpoint_diffusion', 'checkpoint_lora', 'checkpoint_text_cond', 'checkpoint_vae', 'workflow_exists']
+                : ['cuda_available', 'inference_script', 'checkpoint_512', 'checkpoint_mapping', 'checkpoint_bfm'];
+              const falseFields = checks.filter(field => data[field] === false);
               if (notify && gpuFeedbackBox) {
                 gpuFeedbackBox.className = 'gpu-feedback-box error';
                 gpuFeedbackBox.textContent = `🔴 Colab sem GPU/modelo: ${falseFields.join(', ')}`;
@@ -2536,30 +2534,25 @@
         runGpuTaskPolling(pendingTaskId, pendingTaskUrl);
       }
 
-      // Controle de visibilidade e eventos de Movimento
-      const motionSelectEl = document.getElementById('motionSelect');
-      const motionExtraOptionsEl = document.getElementById('motionExtraOptions');
-      const refVideoGroupEl = document.getElementById('refVideoGroup');
-      const expressionScaleSliderEl = document.getElementById('expressionScaleSlider');
-      const expressionScaleLabelEl = document.getElementById('expressionScaleLabel');
+      // Notificação de áudio sem sincronia labial no Viggle-Animate
+      const scriptTextEl = document.getElementById('scriptText');
+      const speechInputEl = document.getElementById('speechInput');
+      const viggleAudioNoticeEl = document.getElementById('viggleAudioNotice');
 
-      if (expressionScaleSliderEl && expressionScaleLabelEl) {
-        expressionScaleSliderEl.addEventListener('input', () => {
-          expressionScaleLabelEl.textContent = `${parseFloat(expressionScaleSliderEl.value).toFixed(2)}x`;
-        });
+      function updateViggleAudioNotice() {
+        const activeTab = document.querySelector('.tab-trigger.active')?.dataset?.target || 'tabText';
+        const hasText = activeTab === 'tabText' && scriptTextEl && scriptTextEl.value.trim().length > 0;
+        const hasSpeech = activeTab === 'tabAudio' && speechInputEl && speechInputEl.files && speechInputEl.files.length > 0;
+        if (viggleAudioNoticeEl) {
+          viggleAudioNoticeEl.style.display = (hasText || hasSpeech) ? 'block' : 'none';
+        }
       }
 
-      if (motionSelectEl) {
-        motionSelectEl.addEventListener('change', () => {
-          const m = motionSelectEl.value;
-          if (motionExtraOptionsEl) {
-            motionExtraOptionsEl.style.display = (m === 'still') ? 'none' : 'grid';
-          }
-          if (refVideoGroupEl) {
-            refVideoGroupEl.style.display = (m === 'ref') ? 'block' : 'none';
-          }
-        });
-      }
+      if (scriptTextEl) scriptTextEl.addEventListener('input', updateViggleAudioNotice);
+      if (speechInputEl) speechInputEl.addEventListener('change', updateViggleAudioNotice);
+      document.querySelectorAll('.tab-trigger').forEach(t => t.addEventListener('click', () => {
+        setTimeout(updateViggleAudioNotice, 50);
+      }));
 
       loadPresets();
       loadGallery();

@@ -1,0 +1,171 @@
+{
+  "_instructions": {
+    "description": "Exemplo de Workflow do Viggle-Animate (MiniMax-H3 ref2va) no formato ComfyUI API Prompt.",
+    "export_guide": "Para exportar seu workflow final testado na interface do ComfyUI: 1) Abra as configurações (ícone de engrenagem no canto superior direito); 2) Marque 'Enable Dev mode Options'; 3) Clique no botão 'Save (API format)'; 4) Salve o arquivo nesta pasta como 'workflows/viggle_api.json'.",
+    "required_node_titles": {
+      "INPUT_IMAGE": "O nó LoadImage responsável pela imagem/foto do personagem DEVE ter o título renomeado para 'INPUT_IMAGE' (_meta.title).",
+      "INPUT_VIDEO": "O nó VHS_LoadVideo responsável pelo vídeo de referência de movimento DEVE ter o título renomeado para 'INPUT_VIDEO' (_meta.title). O colab_viggle_api.py preenche automaticamente 'video' e 'frame_load_cap=124'.",
+      "SEED": "O nó RandomNoise ou gerador de semente DEVE ter o título renomeado para 'SEED' (_meta.title). O colab_viggle_api.py preenche automaticamente um valor aleatório de 'noise_seed'."
+    }
+  },
+  "1": {
+    "inputs": {
+      "image": "personagem_exemplo.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "INPUT_IMAGE"
+    }
+  },
+  "2": {
+    "inputs": {
+      "video": "movimento_exemplo.mp4",
+      "force_rate": 24,
+      "force_size": "Disabled",
+      "custom_width": 512,
+      "custom_height": 512,
+      "frame_load_cap": 124,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {
+      "title": "INPUT_VIDEO"
+    }
+  },
+  "3": {
+    "inputs": {
+      "noise_seed": 42
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "SEED"
+    }
+  },
+  "4": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "lora_name": "viggle_animate_dmd_lora_r64.safetensors",
+      "strength_model": 1.0,
+      "model": ["4", 0]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA (Model Only)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text_cond_name": "fixed_embed_fwd_anyframe.safetensors"
+    },
+    "class_type": "ViggleTextCondLoader",
+    "_meta": {
+      "title": "Load Text Conditioning (Viggle)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "8": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "length": 124,
+      "batch_size": 1,
+      "images": ["2", 0],
+      "ref_image": ["1", 0],
+      "text_cond": ["6", 0],
+      "vae": ["7", 0]
+    },
+    "class_type": "ViggleAnimateConditioning",
+    "_meta": {
+      "title": "Viggle Animate Conditioning"
+    }
+  },
+  "9": {
+    "inputs": {
+      "model": ["5", 0],
+      "conditioning": ["8", 0]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "BasicGuider"
+    }
+  },
+  "10": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "11": {
+    "inputs": {
+      "noise": ["3", 0],
+      "guider": ["9", 0],
+      "sampler": ["10", 0],
+      "sigmas": ["14", 0],
+      "latent_image": ["8", 1]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "12": {
+    "inputs": {
+      "samples": ["11", 0],
+      "vae": ["7", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "13": {
+    "inputs": {
+      "images": ["12", 0],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "viggle_animate_output",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_output": true
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "OUTPUT_VIDEO"
+    }
+  },
+  "14": {
+    "inputs": {
+      "model": ["5", 0],
+      "scheduler": "simple",
+      "steps": 4,
+      "denoise": 1.0
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler"
+    }
+  }
+}
