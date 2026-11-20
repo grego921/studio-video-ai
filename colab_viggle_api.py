@@ -37,6 +37,7 @@ RESULTS_DIR = os.environ.get("RESULTS_DIR", os.path.abspath("/content/output_vid
 WORKFLOW_API_PATH = os.environ.get("WORKFLOW_API_PATH", os.path.abspath("workflows/viggle_api.json"))
 
 MODELS_DIR = os.path.join(COMFYUI_DIR, "models")
+DRIVE_MODELS_DIR = os.environ.get("DRIVE_MODELS_DIR", os.path.abspath("/content/drive/MyDrive/StudioVideoAI/models"))
 DIFFUSION_MODEL_PATH = os.environ.get(
     "DIFFUSION_MODEL_PATH",
     os.path.join(MODELS_DIR, "diffusion_models/minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors")
@@ -53,6 +54,26 @@ VAE_PATH = os.environ.get(
     "VAE_PATH",
     os.path.join(MODELS_DIR, "vae/minimax_h3_video_vae_int8_convrot.safetensors")
 )
+
+def verify_and_ensure_symlink(comfy_path: str, drive_rel_path: str) -> bool:
+    """Verifica se o arquivo do modelo existe no caminho do ComfyUI (inclusive via link simbólico)
+    ou no diretório persistente do Google Drive, restabelecendo o link simbólico caso necessário."""
+    if os.path.exists(comfy_path) and os.path.getsize(comfy_path) > 1024:
+        return True
+    drive_path = os.path.join(DRIVE_MODELS_DIR, drive_rel_path)
+    if os.path.exists(drive_path) and os.path.getsize(drive_path) > 1024:
+        try:
+            os.makedirs(os.path.dirname(comfy_path), exist_ok=True)
+            if os.path.islink(comfy_path) or os.path.exists(comfy_path):
+                try:
+                    os.remove(comfy_path)
+                except Exception:
+                    pass
+            os.symlink(drive_path, comfy_path)
+            return True
+        except Exception:
+            return True
+    return False
 
 NO_PROGRESS_TIMEOUT_S = int(os.environ.get("NO_PROGRESS_TIMEOUT_S", 600))  # 10 min sem modificação no log
 MAX_TOTAL_TIMEOUT_S = int(os.environ.get("MAX_TOTAL_TIMEOUT_S", 3 * 3600))  # 3 horas de teto absoluto
@@ -188,10 +209,22 @@ def check_environment_health():
         except Exception:
             pass
 
-    ckpt_diffusion_ok = os.path.exists(DIFFUSION_MODEL_PATH)
-    ckpt_lora_ok = os.path.exists(LORA_MODEL_PATH)
-    ckpt_text_cond_ok = os.path.exists(TEXT_COND_PATH)
-    ckpt_vae_ok = os.path.exists(VAE_PATH)
+    ckpt_diffusion_ok = verify_and_ensure_symlink(
+        DIFFUSION_MODEL_PATH,
+        "diffusion_models/minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors"
+    )
+    ckpt_lora_ok = verify_and_ensure_symlink(
+        LORA_MODEL_PATH,
+        "loras/viggle_animate_dmd_lora_r64.safetensors"
+    )
+    ckpt_text_cond_ok = verify_and_ensure_symlink(
+        TEXT_COND_PATH,
+        "text_cond/fixed_embed_fwd_anyframe.safetensors"
+    )
+    ckpt_vae_ok = verify_and_ensure_symlink(
+        VAE_PATH,
+        "vae/minimax_h3_video_vae_int8_convrot.safetensors"
+    )
     workflow_exists = os.path.exists(WORKFLOW_API_PATH)
 
     wf_valid, wf_problems = validate_workflow_against_comfyui(WORKFLOW_API_PATH, COMFYUI_URL)
