@@ -59,7 +59,7 @@ def system_info():
     return jsonify({
         "is_vercel": is_vercel,
         "gpu_available": False,
-        "engine": "SadTalker Full-Frame 512px (Modo GPU Colab)" if is_vercel else "Modo Web SaaS Local",
+        "engine": "Viggle-Animate H3 (Modo GPU Colab)" if is_vercel else "Modo Web SaaS Local",
         "version": "v2.5"
     })
 
