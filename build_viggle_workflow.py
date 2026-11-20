@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""
+build_viggle_workflow.py
+
+Gera automaticamente workflows/viggle_api.json a partir do workflow oficial de interface
+(viggle-animate-h3_workflow-v1.2.0.json) utilizando a API GET /object_info de uma instância
+do ComfyUI em execução.
+
+Regras atendidas:
+1. Converte do formato de interface (nodes/links) para o formato API do ComfyUI.
+2. Bypassa nós 'Reroute', ligando a entrada diretamente ao nó e slot de origem real.
+3. Se houver 'PrimitiveNode', transfere seu valor como widget no nó de destino.
+4. Ignora nós de interface puros ('Note', 'MarkdownNote').
+5. Mapeia widgets_values aos parâmetros de widget definidos em /object_info.
+   Trata widgets_values tanto no formato lista quanto dicionário (ex: nós VHS).
+   Descarta o controle extra 'control_after_generate' adicionado pela interface após sementes.
+   Trata combos dinâmicos (ex: BlockSparseAttention / COMFY_DYNAMICCOMBO_V3).
+6. Mantém exclusivamente o caminho do grafo que produz o vídeo final: o nó VHS_VideoCombine
+   cuja entrada 'images' vem de 'VAEDecode'. Poda ramificações de comparação/concatenação
+   (ImageConcanate, VHS_VideoCombine secundário) e nós orfãos.
+7. Ajustes automáticos:
+   - LoadImage: _meta.title = 'INPUT_IMAGE'
+   - VHS_LoadVideo: _meta.title = 'INPUT_VIDEO', frame_load_cap = 124, skip_first_frames = 0
+   - RandomNoise: _meta.title = 'SEED'
+   - LoraLoaderModelOnly: lora_name = 'viggle_animate_dmd_lora_r64.safetensors'
+   - UNETLoader: unet_name = 'minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors'
+   - VAELoader: vae_name = 'minimax_h3_video_vae_int8_convrot.safetensors'
+   - ViggleTextCondLoader: text_cond = 'fixed_embed_fwd_anyframe.safetensors'
+   - VHS_VideoCombine de saída: save_output = True
+8. Validação estrita: se qualquer dependência ou nó não puder ser resolvido com 100% de certeza,
+   aborta imediatamente com mensagem clara em português.
+"""
+
+import os
+import sys
+import json
+import argparse
+import urllib.request
+import urllib.error
+
+
+DEFAULT_WORKFLOW_URL = (
+    "https://raw.githubusercontent.com/Saganaki22/ComfyUI-Viggle-Animate-H3/main/"
+    "example_workflows/viggle-animate-h3_workflow-v1.2.0.json"
+)
+
+DEFAULT_CANDIDATE_PATHS = [
+    "custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-v1.2.0.json",
+    "/content/ComfyUI/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-v1.2.0.json",
+    "temp_comfyui/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-v1.2.0.json",
+]
+
+
+def log_info(msg: str):
+    print(f"[build_workflow] {msg}")
+
+
+def log_err(msg: str):
+    print(f"❌ [build_workflow ERRO] {msg}", file=sys.stderr)
+
+
+def is_widget_type(type_spec) -> bool:
+    """Verifica se uma especificação de entrada em object_info é um widget."""
+    if isinstance(type_spec, list):
+        return True
+    if isinstance(type_spec, str):
+        u = type_spec.upper()
+        if u in ("INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"):
+            return True
+        if type_spec == "COMFY_DYNAMICCOMBO_V3":
+            return True
+    return False
+
+
+def fetch_object_info(comfy_url: str) -> dict:
+    """Obtém as definições de todos os nós registrados no ComfyUI."""
+    url = f"{comfy_url.rstrip('/')}/object_info"
+    log_info(f"Consultando definições de nós em {url}...")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "BuildViggleWorkflow/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            log_info(f"Sucesso: {len(data)} classes de nós retornadas pelo ComfyUI.")
+            return data
+    except urllib.error.URLError as e:
+        log_err(f"Falha de conexão com o ComfyUI em '{url}': {e}")
+        log_err("Certifique-se de que o ComfyUI está em execução antes de rodar este script.")
+        sys.exit(1)
+    except Exception as e:
+        log_err(f"Erro ao processar /object_info do ComfyUI: {e}")
+        sys.exit(1)
+
+
+def load_ui_workflow(source_path_or_url: str) -> dict:
+    """Carrega o JSON do workflow de interface a partir de arquivo local ou URL."""
+    # 1. Se o caminho fornecido existir diretamente:
+    if source_path_or_url and os.path.exists(source_path_or_url):
+        log_info(f"Carregando workflow local: {source_path_or_url}")
+        with open(source_path_or_url, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    # 2. Se for uma URL HTTP/HTTPS:
+    if source_path_or_url and (source_path_or_url.startswith("http://") or source_path_or_url.startswith("https://")):
+        log_info(f"Baixando workflow da URL: {source_path_or_url}")
+        req = urllib.request.Request(source_path_or_url, headers={"User-Agent": "BuildViggleWorkflow/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    # 3. Tentar os caminhos padrão conhecidos:
+    for candidate in DEFAULT_CANDIDATE_PATHS:
+        if os.path.exists(candidate):
+            log_info(f"Carregando workflow do caminho padrão: {candidate}")
+            with open(candidate, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+    # 4. Fallback: baixar do GitHub oficial
+    log_info(f"Arquivo local não encontrado. Baixando do repositório oficial: {DEFAULT_WORKFLOW_URL}")
+    req = urllib.request.Request(DEFAULT_WORKFLOW_URL, headers={"User-Agent": "BuildViggleWorkflow/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def resolve_link_source(link_id: int, node_map: dict, link_map: dict, visited: set = None):
+    """
+    Resolve a origem de um link recursivamente, atravessando nós 'Reroute'.
+    Retorna (origin_node_id, origin_slot_index) ou ('PRIMITIVE', valor).
+    """
+    if visited is None:
+        visited = set()
+    if link_id in visited:
+        raise ValueError(f"Ciclo detectado ao resolver o link {link_id}")
+    visited.add(link_id)
+
+    if link_id not in link_map:
+        raise ValueError(f"Link ID {link_id} não encontrado na lista de conexões do workflow.")
+
+    link = link_map[link_id]
+    orig_id = link[1]
+    orig_slot = link[2]
+
+    orig_node = node_map.get(orig_id)
+    if not orig_node:
+        raise ValueError(f"Nó de origem {orig_id} apontado pelo link {link_id} não existe no workflow.")
+
+    orig_type = orig_node.get("type")
+
+    # Bypassar nós Reroute religando à sua própria entrada
+    if orig_type == "Reroute":
+        inputs = orig_node.get("inputs", [])
+        if not inputs or inputs[0].get("link") is None:
+            raise ValueError(f"Nó Reroute (ID {orig_id}) está desconectado na entrada.")
+        return resolve_link_source(inputs[0]["link"], node_map, link_map, visited)
+
+    # PrimitiveNode: repassar o valor fixado
+    if orig_type == "PrimitiveNode":
+        wv = orig_node.get("widgets_values", [])
+        val = wv[0] if wv else None
+        return ("PRIMITIVE", val)
+
+    return (orig_id, orig_slot)
+
+
+def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
+    """
+    Executa a conversão completa do workflow UI para formato API.
+    Aplica resolução de links, poda de ramos secundários e overrides obrigatórios.
+    """
+    nodes = wf_ui.get("nodes", [])
+    links = wf_ui.get("links", [])
+
+    if not nodes:
+        raise ValueError("O workflow de interface não contém nós válidos.")
+
+    node_map = {n["id"]: n for n in nodes}
+    link_map = {l[0]: l for l in links}
+
+    # -------------------------------------------------------------------------
+    # 1. Identificar o nó VHS_VideoCombine de saída primária
+    #    (cuja entrada 'images' vem diretamente de um nó VAEDecode)
+    # -------------------------------------------------------------------------
+    primary_output_id = None
+    all_video_combines = []
+
+    for n in nodes:
+        if n.get("type") == "VHS_VideoCombine":
+            all_video_combines.append(n["id"])
+            for inp in n.get("inputs", []):
+                if inp.get("name") == "images" and inp.get("link") is not None:
+                    try:
+                        src_res = resolve_link_source(inp["link"], node_map, link_map)
+                    except Exception as e:
+                        raise ValueError(f"Erro ao resolver entrada 'images' do VHS_VideoCombine {n['id']}: {e}")
+
+                    if src_res[0] != "PRIMITIVE":
+                        src_node = node_map.get(src_res[0])
+                        if src_node and src_node.get("type") == "VAEDecode":
+                            primary_output_id = n["id"]
+                            break
+
+    if primary_output_id is None:
+        raise ValueError(
+            f"Não foi possível identificar com 100% de certeza o nó VHS_VideoCombine primário. "
+            f"Nós VHS_VideoCombine encontrados: {all_video_combines}. "
+            f"Nenhum deles possui a entrada 'images' conectada diretamente a um VAEDecode."
+        )
+
+    log_info(f"Nó de saída primária identificado: VHS_VideoCombine ID {primary_output_id}")
+
+    # -------------------------------------------------------------------------
+    # 2. Rastreamento e poda de dead-ends (Grafo de dependência reversa)
+    # -------------------------------------------------------------------------
+    reachable_node_ids = set()
+    queue = [primary_output_id]
+
+    while queue:
+        curr_id = queue.pop(0)
+        if curr_id in reachable_node_ids:
+            continue
+        reachable_node_ids.add(curr_id)
+
+        curr_node = node_map.get(curr_id)
+        if not curr_node:
+            continue
+
+        for inp in curr_node.get("inputs", []):
+            lid = inp.get("link")
+            if lid is not None:
+                src_res = resolve_link_source(lid, node_map, link_map)
+                if src_res[0] != "PRIMITIVE":
+                    upstream_id = src_res[0]
+                    if upstream_id not in reachable_node_ids:
+                        queue.append(upstream_id)
+
+    pruned_node_ids = set(node_map.keys()) - reachable_node_ids
+    log_info(
+        f"Grafo filtrado: {len(reachable_node_ids)} nós ativos mantidos. "
+        f"{len(pruned_node_ids)} nós descartados/podados (ex: comparação, notas, reroutes órfãos)."
+    )
+
+    # -------------------------------------------------------------------------
+    # 3. Mapeamento de cada nó ativo para o formato API do ComfyUI
+    # -------------------------------------------------------------------------
+    api_workflow = {}
+
+    for nid in sorted(list(reachable_node_ids)):
+        n = node_map[nid]
+        ctype = n.get("type")
+        title = n.get("title")
+
+        # Ignorar nós de anotação de interface se tiverem entrado no grafo
+        if ctype in ("Note", "MarkdownNote"):
+            continue
+
+        if ctype not in object_info:
+            raise ValueError(
+                f"Classe de nó '{ctype}' (ID {nid}) não foi encontrada no /object_info do ComfyUI. "
+                f"Verifique se todos os custom nodes necessários estão instalados."
+            )
+
+        info = object_info[ctype]
+        req_spec = info.get("input", {}).get("required", {})
+        opt_spec = info.get("input", {}).get("optional", {})
+
+        api_node = {
+            "inputs": {},
+            "class_type": ctype,
+            "_meta": {
+                "title": title or ctype
+            }
+        }
+
+        # a) Mapear conexões originadas de links
+        for inp in n.get("inputs", []):
+            iname = inp.get("name")
+            lid = inp.get("link")
+            if lid is not None:
+                src_res = resolve_link_source(lid, node_map, link_map)
+                if src_res[0] == "PRIMITIVE":
+                    api_node["inputs"][iname] = src_res[1]
+                else:
+                    api_node["inputs"][iname] = [str(src_res[0]), src_res[1]]
+
+        # b) Mapear widgets_values
+        wv = n.get("widgets_values")
+        if isinstance(wv, dict):
+            # Formato de dicionário (ex: VHS_VideoCombine, VHS_LoadVideo)
+            for k, v in wv.items():
+                if k in req_spec or k in opt_spec:
+                    if k not in api_node["inputs"]:
+                        api_node["inputs"][k] = v
+        elif isinstance(wv, list):
+            # Formato de lista sequencial
+            wv_idx = 0
+            all_specs = []
+            for k, v in req_spec.items():
+                all_specs.append((k, v, True))
+            for k, v in opt_spec.items():
+                all_specs.append((k, v, False))
+
+            for param_name, param_spec, is_req in all_specs:
+                if wv_idx >= len(wv):
+                    break
+                if param_name in api_node["inputs"]:
+                    # Já suprido por conexão de link
+                    continue
+
+                ptype = param_spec[0]
+                if is_widget_type(ptype):
+                    val = wv[wv_idx]
+                    wv_idx += 1
+                    api_node["inputs"][param_name] = val
+
+                    # Tratamento de COMFY_DYNAMICCOMBO_V3 (ex: BlockSparseAttention)
+                    if ptype == "COMFY_DYNAMICCOMBO_V3" and isinstance(param_spec[1], dict):
+                        options = param_spec[1].get("options", [])
+                        matched_opt = next((o for o in options if o.get("key") == val), None)
+                        if matched_opt:
+                            sub_req = matched_opt.get("inputs", {}).get("required", {})
+                            for sub_k, sub_v in sub_req.items():
+                                if wv_idx < len(wv):
+                                    sub_val = wv[wv_idx]
+                                    api_node["inputs"][f"{param_name}.{sub_k}"] = sub_val
+                                    api_node["inputs"][sub_k] = sub_val
+                                    wv_idx += 1
+
+                    # Descarte do valor extra 'control_after_generate' adicionado pela interface
+                    if param_name in ("seed", "noise_seed") or param_name.endswith("_seed"):
+                        if wv_idx < len(wv) and isinstance(wv[wv_idx], str):
+                            if wv[wv_idx] in ("fixed", "increment", "decrement", "randomize"):
+                                wv_idx += 1
+
+        # ---------------------------------------------------------------------
+        # 4. Ajustes automáticos mandatários (Regra 3)
+        # ---------------------------------------------------------------------
+        if ctype == "LoadImage":
+            api_node["_meta"]["title"] = "INPUT_IMAGE"
+
+        elif ctype == "VHS_LoadVideo":
+            api_node["_meta"]["title"] = "INPUT_VIDEO"
+            api_node["inputs"]["frame_load_cap"] = 124
+            api_node["inputs"]["skip_first_frames"] = 0
+
+        elif ctype == "RandomNoise":
+            api_node["_meta"]["title"] = "SEED"
+
+        elif ctype == "LoraLoaderModelOnly":
+            api_node["inputs"]["lora_name"] = "viggle_animate_dmd_lora_r64.safetensors"
+
+        elif ctype == "UNETLoader":
+            api_node["inputs"]["unet_name"] = "minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors"
+
+        elif ctype == "VAELoader":
+            api_node["inputs"]["vae_name"] = "minimax_h3_video_vae_int8_convrot.safetensors"
+
+        elif ctype == "ViggleTextCondLoader":
+            # No ComfyUI o parâmetro chama-se 'text_cond'
+            if "text_cond" in req_spec:
+                api_node["inputs"]["text_cond"] = "fixed_embed_fwd_anyframe.safetensors"
+            if "text_cond_name" in req_spec:
+                api_node["inputs"]["text_cond_name"] = "fixed_embed_fwd_anyframe.safetensors"
+
+        elif ctype == "VHS_VideoCombine" and nid == primary_output_id:
+            api_node["inputs"]["save_output"] = True
+
+        api_workflow[str(nid)] = api_node
+
+    return api_workflow
+
+
+def validate_api_workflow(api_wf: dict, object_info: dict):
+    """
+    Validação estrita do workflow gerado contra as regras do sistema e o object_info do ComfyUI.
+    Garante 100% de certeza antes de salvar.
+    """
+    errors = []
+
+    # 1. Validar presença dos 3 títulos obrigatórios
+    required_titles = ["INPUT_IMAGE", "INPUT_VIDEO", "SEED"]
+    found_titles = set()
+    for nid, node in api_wf.items():
+        title = node.get("_meta", {}).get("title")
+        if title:
+            found_titles.add(title)
+
+    for req_title in required_titles:
+        if req_title not in found_titles:
+            errors.append(f"Título obrigatório '{req_title}' não encontrado em nenhum nó do workflow.")
+
+    # 2. Validar que cada nó possui class_type existente e todas as entradas obrigatórias
+    for nid, node in api_wf.items():
+        ctype = node.get("class_type")
+        if not ctype or ctype not in object_info:
+            errors.append(f"Nó [{nid}]: class_type '{ctype}' não existe no ComfyUI.")
+            continue
+
+        req_inputs = object_info[ctype].get("input", {}).get("required", {})
+        for req_k in req_inputs.keys():
+            if req_k not in node.get("inputs", {}):
+                errors.append(f"Nó [{nid}] ({ctype}): entrada obrigatória '{req_k}' está ausente.")
+
+    if errors:
+        log_err("Falhas na validação do workflow gerado:")
+        for err in errors:
+            log_err(f"  - {err}")
+        raise ValueError(f"Workflow API inválido ({len(errors)} problemas detectados). Abortando.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Converte o workflow UI oficial do Viggle-Animate para o formato API do ComfyUI."
+    )
+    parser.add_argument(
+        "--workflow-in",
+        type=str,
+        default="",
+        help="Caminho local ou URL do arquivo viggle-animate-h3_workflow-v1.2.0.json",
+    )
+    parser.add_argument(
+        "--workflow-out",
+        type=str,
+        default="workflows/viggle_api.json",
+        help="Caminho de saída para o workflow API (default: workflows/viggle_api.json)",
+    )
+    parser.add_argument(
+        "--comfy-url",
+        type=str,
+        default="http://127.0.0.1:8188",
+        help="URL base da API do ComfyUI (default: http://127.0.0.1:8188)",
+    )
+
+    args = parser.parse_args()
+
+    print("=" * 75)
+    print("🛠️  BUILD VIGGLE WORKFLOW: GERADOR DE WORKFLOW API COMFYUI")
+    print("=" * 75)
+
+    # 1. Consultar /object_info
+    object_info = fetch_object_info(args.comfy_url)
+
+    # 2. Carregar workflow UI
+    try:
+        wf_ui = load_ui_workflow(args.workflow_in)
+    except Exception as e:
+        log_err(f"Erro ao carregar workflow de interface: {e}")
+        sys.exit(1)
+
+    # 3. Converter para formato API
+    try:
+        api_wf = convert_workflow(wf_ui, object_info)
+    except Exception as e:
+        log_err(f"Erro durante a conversão do workflow: {e}")
+        sys.exit(1)
+
+    # 4. Validar integridade
+    try:
+        validate_api_workflow(api_wf, object_info)
+    except Exception as e:
+        log_err(f"Erro de validação: {e}")
+        sys.exit(1)
+
+    # 5. Salvar arquivo final
+    out_dir = os.path.dirname(os.path.abspath(args.workflow_out))
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(args.workflow_out, "w", encoding="utf-8") as f:
+        json.dump(api_wf, f, indent=2, ensure_ascii=False)
+
+    print("\n" + "=" * 75)
+    print(f"✅ WORKFLOW API GERADO COM SUCESSO: {args.workflow_out}")
+    print(f"📊 Total de nós operacionais: {len(api_wf)}")
+    print(f"🎯 Nó de Saída Final (Vídeo) : VHS_VideoCombine (save_output = True)")
+    print(f"🖼️  Entrada de Foto (Image)   : LoadImage (INPUT_IMAGE)")
+    print(f"🎬 Entrada de Movimento      : VHS_LoadVideo (INPUT_VIDEO, cap: 124)")
+    print(f"🎲 Semente de Ruído          : RandomNoise (SEED)")
+    print("=" * 75 + "\n")
+
+
+if __name__ == "__main__":
+    main()

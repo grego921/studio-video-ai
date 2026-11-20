@@ -1,114 +1,75 @@
 {
-  "_instructions": {
-    "status": "ESBOÇO NÃO TESTADO: será substituído pelo export real do ComfyUI",
-    "description": "Exemplo de Workflow do Viggle-Animate (MiniMax-H3 ref2va) no formato ComfyUI API Prompt.",
-    "export_guide": "Para exportar seu workflow final testado na interface do ComfyUI: 1) Abra as configurações (ícone de engrenagem no canto superior direito); 2) Marque 'Enable Dev mode Options'; 3) Clique no botão 'Save (API format)'; 4) Salve o arquivo nesta pasta como 'workflows/viggle_api.json'.",
-    "required_node_titles": {
-      "INPUT_IMAGE": "O nó LoadImage responsável pela imagem/foto do personagem DEVE ter o título renomeado para 'INPUT_IMAGE' (_meta.title).",
-      "INPUT_VIDEO": "O nó VHS_LoadVideo responsável pelo vídeo de referência de movimento DEVE ter o título renomeado para 'INPUT_VIDEO' (_meta.title). O colab_viggle_api.py preenche automaticamente 'video' e 'frame_load_cap=124'.",
-      "SEED": "O nó RandomNoise ou gerador de semente DEVE ter o título renomeado para 'SEED' (_meta.title). O colab_viggle_api.py preenche automaticamente um valor aleatório de 'noise_seed'."
-    }
-  },
   "1": {
     "inputs": {
-      "image": "personagem_exemplo.png",
-      "upload": "image"
+      "cond_video": [
+        "26",
+        0
+      ],
+      "ref_image": [
+        "5",
+        0
+      ],
+      "text_cond": [
+        "2",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ],
+      "width": 0,
+      "height": 0,
+      "length": 124
     },
-    "class_type": "LoadImage",
+    "class_type": "ViggleAnimateConditioning",
     "_meta": {
-      "title": "INPUT_IMAGE"
+      "title": "ViggleAnimateConditioning"
     }
   },
   "2": {
     "inputs": {
-      "video": "movimento_exemplo.mp4",
+      "text_cond": "fixed_embed_fwd_anyframe.safetensors"
+    },
+    "class_type": "ViggleTextCondLoader",
+    "_meta": {
+      "title": "ViggleTextCondLoader"
+    }
+  },
+  "3": {
+    "inputs": {
+      "video": "ssstik.io_@funsizedreeee_1788834249891 (1).mp4",
       "force_rate": 24,
-      "force_size": "Disabled",
-      "custom_width": 512,
-      "custom_height": 512,
+      "custom_width": 0,
+      "custom_height": 0,
       "frame_load_cap": 124,
       "skip_first_frames": 0,
-      "select_every_nth": 1
+      "select_every_nth": 1,
+      "format": "AnimateDiff"
     },
     "class_type": "VHS_LoadVideo",
     "_meta": {
       "title": "INPUT_VIDEO"
     }
   },
-  "3": {
-    "inputs": {
-      "noise_seed": 42
-    },
-    "class_type": "RandomNoise",
-    "_meta": {
-      "title": "SEED"
-    }
-  },
   "4": {
-    "inputs": {
-      "unet_name": "minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors",
-      "weight_dtype": "default"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "Load Diffusion Model"
-    }
-  },
-  "5": {
-    "inputs": {
-      "lora_name": "viggle_animate_dmd_lora_r64.safetensors",
-      "strength_model": 1.0,
-      "model": ["4", 0]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA (Model Only)"
-    }
-  },
-  "6": {
-    "inputs": {
-      "text_cond_name": "fixed_embed_fwd_anyframe.safetensors"
-    },
-    "class_type": "ViggleTextCondLoader",
-    "_meta": {
-      "title": "Load Text Conditioning (Viggle)"
-    }
-  },
-  "7": {
     "inputs": {
       "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
     },
     "class_type": "VAELoader",
     "_meta": {
-      "title": "Load VAE"
+      "title": "VAELoader"
     }
   },
-  "8": {
+  "5": {
     "inputs": {
-      "width": 0,
-      "height": 0,
-      "length": 124,
-      "cond_video": ["2", 0],
-      "ref_image": ["1", 0],
-      "text_cond": ["6", 0],
-      "vae": ["7", 0]
+      "image": "ChatGPT Image Sep 8, 2026, 03_31_58 AM.png"
     },
-    "class_type": "ViggleAnimateConditioning",
+    "class_type": "LoadImage",
     "_meta": {
-      "title": "Viggle Animate Conditioning"
+      "title": "INPUT_IMAGE"
     }
   },
   "9": {
-    "inputs": {
-      "model": ["5", 0],
-      "conditioning": ["8", 0]
-    },
-    "class_type": "BasicGuider",
-    "_meta": {
-      "title": "BasicGuider"
-    }
-  },
-  "10": {
     "inputs": {
       "sampler_name": "euler"
     },
@@ -117,55 +78,211 @@
       "title": "KSamplerSelect"
     }
   },
+  "10": {
+    "inputs": {
+      "noise_seed": 2347709
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "SEED"
+    }
+  },
   "11": {
     "inputs": {
-      "noise": ["3", 0],
-      "guider": ["9", 0],
-      "sampler": ["10", 0],
-      "sigmas": ["14", 0],
-      "latent_image": ["8", 1]
+      "model": [
+        "25",
+        0
+      ],
+      "conditioning": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "BasicGuider"
+    }
+  },
+  "12": {
+    "inputs": {
+      "noise": [
+        "10",
+        0
+      ],
+      "guider": [
+        "11",
+        0
+      ],
+      "sampler": [
+        "9",
+        0
+      ],
+      "sigmas": [
+        "40",
+        0
+      ],
+      "latent_image": [
+        "1",
+        1
+      ]
     },
     "class_type": "SamplerCustomAdvanced",
     "_meta": {
       "title": "SamplerCustomAdvanced"
     }
   },
-  "12": {
-    "inputs": {
-      "samples": ["11", 0],
-      "vae": ["7", 0]
-    },
-    "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE Decode"
-    }
-  },
   "13": {
     "inputs": {
-      "images": ["12", 0],
-      "frame_rate": 24,
-      "loop_count": 0,
-      "filename_prefix": "viggle_animate_output",
-      "format": "video/h264-mp4",
-      "pix_fmt": "yuv420p",
-      "crf": 19,
-      "save_output": true
+      "unet_name": "minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
     },
-    "class_type": "VHS_VideoCombine",
+    "class_type": "UNETLoader",
     "_meta": {
-      "title": "OUTPUT_VIDEO"
+      "title": "UNETLoader"
     }
   },
   "14": {
     "inputs": {
-      "model": ["5", 0],
-      "scheduler": "simple",
-      "steps": 4,
-      "denoise": 1.0
+      "model": [
+        "46",
+        0
+      ],
+      "shift_video": 3,
+      "shift_audio": 3
     },
-    "class_type": "BasicScheduler",
+    "class_type": "MiniMaxH3SigmaShift",
     "_meta": {
-      "title": "BasicScheduler"
+      "title": "MiniMaxH3SigmaShift"
+    }
+  },
+  "16": {
+    "inputs": {
+      "model": [
+        "13",
+        0
+      ],
+      "lora_name": "viggle_animate_dmd_lora_r64.safetensors",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoraLoaderModelOnly"
+    }
+  },
+  "17": {
+    "inputs": {
+      "samples": [
+        "12",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAEDecode"
+    }
+  },
+  "21": {
+    "inputs": {
+      "images": [
+        "17",
+        0
+      ],
+      "audio": [
+        "3",
+        2
+      ],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "video/viggle-h3/00000",
+      "format": "video/h264-mp4",
+      "pingpong": false,
+      "save_output": true
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "VHS_VideoCombine"
+    }
+  },
+  "22": {
+    "inputs": {
+      "model": [
+        "16",
+        0
+      ],
+      "attention": "comfy kitchen attention"
+    },
+    "class_type": "ModelAttentionBackend",
+    "_meta": {
+      "title": "ModelAttentionBackend"
+    }
+  },
+  "25": {
+    "inputs": {
+      "model": [
+        "14",
+        0
+      ],
+      "max_resolution": 360,
+      "jpeg_quality": 80,
+      "suppress_default_preview": true,
+      "preview_frames": 124,
+      "preview_fps": 12,
+      "tiny_vae": "taeh3.safetensors"
+    },
+    "class_type": "ModelPreviewOverrideKJ",
+    "_meta": {
+      "title": "ModelPreviewOverrideKJ"
+    }
+  },
+  "26": {
+    "inputs": {
+      "image": [
+        "3",
+        0
+      ],
+      "megapixels": 0.4,
+      "divisible_by": 32,
+      "interpolation_mode": "nearest"
+    },
+    "class_type": "JWImageResizeToMegapixels",
+    "_meta": {
+      "title": "JWImageResizeToMegapixels"
+    }
+  },
+  "40": {
+    "inputs": {
+      "sigmas_string": "1.0, 0.8571428571428571, 0.6, 0.0",
+      "interpolate_to_steps": 3
+    },
+    "class_type": "CustomSigmas",
+    "_meta": {
+      "title": "Custom Sigma 4 steps (Upstream)"
+    }
+  },
+  "46": {
+    "inputs": {
+      "model": [
+        "22",
+        0
+      ],
+      "selection": "sol-attn",
+      "selection.tau": 1.3,
+      "tau": 1.3,
+      "start_percent": 0.2,
+      "end_percent": 1,
+      "dense_blocks": "",
+      "min_tokens": 12288,
+      "extra_tokens": 256,
+      "sink_conditioning": "exact_kv_and_rows",
+      "verbose": false
+    },
+    "class_type": "BlockSparseAttention",
+    "_meta": {
+      "title": "BlockSparseAttention"
     }
   }
 }
