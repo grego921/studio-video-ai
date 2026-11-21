@@ -354,7 +354,7 @@
     @media (max-width: 600px) {
       .format-grid { grid-template-columns: 1fr; }
     }
-    .format-card {
+    .format-card, .quality-card {
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -368,15 +368,15 @@
       text-align: center;
       user-select: none;
     }
-    .format-card input[type="radio"] {
+    .format-card input[type="radio"], .quality-card input[type="radio"] {
       display: none;
     }
-    .format-card:hover {
+    .format-card:hover, .quality-card:hover {
       background: rgba(99, 102, 241, 0.08);
       border-color: rgba(99, 102, 241, 0.4);
       transform: translateY(-2px);
     }
-    .format-card.active {
+    .format-card.active, .quality-card.active {
       background: rgba(99, 102, 241, 0.18);
       border-color: #6366f1;
       box-shadow: 0 0 16px rgba(99, 102, 241, 0.3);
@@ -1266,6 +1266,33 @@
             </div>
           </div>
 
+          <div class="form-group" style="margin-top: 16px;">
+            <label class="form-label">Qualidade:</label>
+            <div class="format-grid" id="qualityGrid">
+              <label class="quality-card active" data-quality="rapido">
+                <input type="radio" name="videoQuality" value="rapido" checked>
+                <div class="format-icon">⚡</div>
+                <div class="format-name">Rápido</div>
+                <div class="format-ratio">0.4 MP</div>
+              </label>
+
+              <label class="quality-card" data-quality="padrao">
+                <input type="radio" name="videoQuality" value="padrao">
+                <div class="format-icon">✨</div>
+                <div class="format-name">Padrão</div>
+                <div class="format-ratio">0.7 MP</div>
+              </label>
+
+              <label class="quality-card" data-quality="alta">
+                <input type="radio" name="videoQuality" value="alta">
+                <div class="format-icon">💎</div>
+                <div class="format-name">Alta</div>
+                <div class="format-ratio">1.0 MP</div>
+              </label>
+            </div>
+            <p class="dropzone-hint" style="margin-top: 6px;">Alta demora mais e usa mais memória.</p>
+          </div>
+
           <div class="toggle-item" style="margin-top: 16px; background: rgba(99, 102, 241, 0.06); border: 1px solid rgba(99, 102, 241, 0.2); border-radius: 8px; padding: 12px 14px;">
             <div class="toggle-meta">
               <strong style="color: #a5b4fc;">🌟 Manter Foto Completa (Com Fundo, Roupas e Cenário)</strong>
@@ -1572,6 +1599,16 @@
       document.querySelectorAll('.format-card').forEach(card => {
         card.addEventListener('click', () => {
           document.querySelectorAll('.format-card').forEach(c => c.classList.remove('active'));
+          card.classList.add('active');
+          const r = card.querySelector('input[type="radio"]');
+          if (r) r.checked = true;
+        });
+      });
+
+      // Seletor de Qualidade
+      document.querySelectorAll('.quality-card').forEach(card => {
+        card.addEventListener('click', () => {
+          document.querySelectorAll('.quality-card').forEach(c => c.classList.remove('active'));
           card.classList.add('active');
           const r = card.querySelector('input[type="radio"]');
           if (r) r.checked = true;
@@ -2250,7 +2287,10 @@
           const keepFullVal = keepFullCheck ? keepFullCheck.checked : true;
           neuralFormData.append('keep_full', keepFullVal ? 'true' : 'false');
 
-          // 6. Qualidade selecionada: fast (256px) / high (512px)
+          // Qualidade (rapido / padrao / alta)
+          const selQualityEl = document.querySelector('.quality-card.active');
+          const chosenQuality = selQualityEl ? (selQualityEl.dataset.quality || selQualityEl.querySelector('input[type="radio"]')?.value) : 'rapido';
+          neuralFormData.append('quality', chosenQuality || 'rapido');
 
           // Vídeo de movimento (obrigatório para o motor Viggle-Animate)
           const motionVidInput = document.getElementById('motionVideoInput');
@@ -2348,6 +2388,10 @@
         formData.append('enable_walk', document.getElementById('enableWalkCheck').checked ? 'true' : 'false');
         formData.append('use_frame', document.getElementById('enableBrandingCheck').checked ? 'true' : 'false');
         formData.append('use_logo', document.getElementById('enableBrandingCheck').checked ? 'true' : 'false');
+
+        const selFallbackQualityEl = document.querySelector('.quality-card.active');
+        const chosenFallbackQuality = selFallbackQualityEl ? (selFallbackQualityEl.dataset.quality || selFallbackQualityEl.querySelector('input[type="radio"]')?.value) : 'rapido';
+        formData.append('quality', chosenFallbackQuality || 'rapido');
 
         submitBtn.disabled = true;
         submitBtnText.textContent = 'Processando com IA...';
