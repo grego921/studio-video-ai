@@ -114,8 +114,16 @@ MOCK_OBJECT_INFO = {
 # ---------------------------------------------------------------------------
 class MockComfyUISimulator(BaseHTTPRequestHandler):
     simulate_oom = False
+    simulate_error = False
+    error_message = ""
     is_long_mode = False
     last_prompt = None
+    history_delay_count = 0
+    history_delay_seconds = 0.0
+    history_disconnect_count = 0
+    history_invalid_json_count = 0
+    interrupt_count = 0
+    queue_clear_count = 0
 
     def log_message(self, format, *args):
         pass
@@ -141,6 +149,25 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
 
         if self.path.startswith("/history/"):
             prompt_id = self.path.split("/history/")[-1]
+
+            if MockComfyUISimulator.history_delay_count > 0:
+                MockComfyUISimulator.history_delay_count -= 1
+                if MockComfyUISimulator.history_delay_seconds > 0:
+                    time.sleep(MockComfyUISimulator.history_delay_seconds)
+
+            if MockComfyUISimulator.history_disconnect_count > 0:
+                MockComfyUISimulator.history_disconnect_count -= 1
+                self.close_connection = True
+                return
+
+            if MockComfyUISimulator.history_invalid_json_count > 0:
+                MockComfyUISimulator.history_invalid_json_count -= 1
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"INVALID_JSON_RESPONSE{{")
+                return
+
             if MockComfyUISimulator.simulate_oom:
                 data = {
                     prompt_id: {
@@ -155,6 +182,26 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
                                         "node_type": "ViggleChunkedSampler" if MockComfyUISimulator.is_long_mode else "SamplerCustomAdvanced",
                                         "exception_type": "OutOfMemoryError",
                                         "exception_message": "CUDA out of memory. Tried to allocate 4.00 GiB"
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                }
+            elif MockComfyUISimulator.simulate_error:
+                data = {
+                    prompt_id: {
+                        "status": {
+                            "status_str": "error",
+                            "completed": False,
+                            "messages": [
+                                [
+                                    "execution_error",
+                                    {
+                                        "node_id": "55" if MockComfyUISimulator.is_long_mode else "12",
+                                        "node_type": "ViggleChunkedSampler" if MockComfyUISimulator.is_long_mode else "SamplerCustomAdvanced",
+                                        "exception_type": "RuntimeError",
+                                        "exception_message": MockComfyUISimulator.error_message or "Falha interna no nó sampler"
                                     }
                                 ]
                             ]
@@ -214,8 +261,35 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"prompt_id": "test_prompt_long_123"}).encode("utf-8"))
             return
 
+        if self.path == "/interrupt":
+            MockComfyUISimulator.interrupt_count += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+
+        if self.path == "/queue":
+            try:
+                q_req = json.loads(body.decode("utf-8"))
+                if q_req.get("clear"):
+                    MockComfyUISimulator.queue_clear_count += 1
+            except Exception:
+                pass
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+
         self.send_response(404)
         self.end_headers()
+
+
+class SilentHTTPServer(HTTPServer):
+    def handle_error(self, request, client_address):
+        # Silencia ConnectionAbortedError e ConnectionResetError esperados nos testes de resiliência
+        pass
 
 
 def run_tests():
@@ -232,7 +306,7 @@ def run_tests():
         tempfile.tempdir = created_temp_root
 
     # Iniciar servidor mock
-    server = HTTPServer(("127.0.0.1", 0), MockComfyUISimulator)
+    server = SilentHTTPServer(("127.0.0.1", 0), MockComfyUISimulator)
     port = server.server_port
     api.COMFYUI_URL = f"http://127.0.0.1:{port}"
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -432,31 +506,32 @@ def run_tests():
     # Teste 6: Telemetria de Blocos ("bloco X de Y") no Tracker
     # =========================================================================
     print("\n--- Teste 6: Telemetria e Progresso de Blocos ---")
-    tracker = api.ComfyUIProgressTracker("http://127.0.0.1:8188", "test_client", "test_prompt")
+    tracker = api.ComfyUIProgressTracker("http://127.0.0.1:8188", "test_client", "test_prompt", sampler_node_id="55")
 
-    # Simular recebimento de evento viggle.chunk_progress
-    tracker._handle_ws_msg({
-        "type": "viggle.chunk_progress",
-        "data": {
-            "prompt_id": "test_prompt",
-            "text": "Chunk 3 of 8: frames 204-327, seed 44 carry 7 lat — sampling"
-        }
-    })
-    assert tracker.current_chunk == 3, f"Esperado chunk 3, obteve {tracker.current_chunk}"
-    assert tracker.total_chunks == 8, f"Esperado total 8, obteve {tracker.total_chunks}"
-    print(f" [OK] Tracker extraiu corretamente bloco {tracker.current_chunk} de {tracker.total_chunks}.")
-
-    # Simular evento de pbar (progress standard)
+    # 1. Simular evento de pbar (progress standard) do nó sampler antes de chunk_progress
     tracker._handle_ws_msg({
         "type": "progress",
         "data": {
             "prompt_id": "test_prompt",
-            "value": 4,
+            "node": "55",
+            "value": 3,
             "max": 8
         }
     })
-    assert tracker.current_chunk == 4 and tracker.total_chunks == 8
+    assert tracker.current_chunk == 3 and tracker.total_chunks == 8, f"Esperado 3 de 8, obteve {tracker.current_chunk} de {tracker.total_chunks}"
     print(f" [OK] Tracker atualizou via progress event para bloco {tracker.current_chunk} de {tracker.total_chunks}.")
+
+    # 2. Simular recebimento de evento viggle.chunk_progress assumindo controle exclusivo
+    tracker._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {
+            "prompt_id": "test_prompt",
+            "text": "Chunk 4 of 8: frames 204-327, seed 44 carry 7 lat — sampling"
+        }
+    })
+    assert tracker.current_chunk == 4, f"Esperado chunk 4, obteve {tracker.current_chunk}"
+    assert tracker.total_chunks == 8, f"Esperado total 8, obteve {tracker.total_chunks}"
+    print(f" [OK] Tracker extraiu corretamente bloco {tracker.current_chunk} de {tracker.total_chunks} via viggle.chunk_progress.")
 
     # =========================================================================
     # Teste 7: Health Check com Workflow Longo Ausente (Requirement 4 & 5)
@@ -610,6 +685,248 @@ def run_tests():
         api.TEXT_COND_PATH = orig_text
         api.VAE_PATH = orig_vae
         shutil.rmtree(sim_colab_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 9: Filtro Estrito no Tracker (VHS_LoadVideo vs Sampler e Teto de 100)
+    # =========================================================================
+    print("\n--- Teste 9: Filtro Estrito no Tracker (VHS_LoadVideo vs Sampler e Teto de 100) ---")
+    tr_filter = api.ComfyUIProgressTracker("http://127.0.0.1:8188", "client_9", "prompt_9", sampler_node_id="55")
+    old_time = tr_filter.last_progress_time
+    time.sleep(0.01)
+
+    # 1. Evento progress do VHS_LoadVideo (nó 3, 34 de 720) NÃO vira bloco
+    tr_filter._handle_ws_msg({
+        "type": "progress",
+        "data": {
+            "prompt_id": "prompt_9",
+            "node": "3",
+            "value": 34,
+            "max": 720
+        }
+    })
+    assert tr_filter.current_chunk is None, f"VHS_LoadVideo não deve alterar chunk! Obteve {tr_filter.current_chunk}"
+    assert tr_filter.total_chunks is None
+    assert tr_filter.last_progress_time > old_time, "Evento de outro nó deve renovar atividade para timeout"
+    print(" [OK] Evento progress do VHS_LoadVideo (34 de 720) ignorado para blocos mas renovou atividade.")
+
+    # 2. Evento progress do nó sampler (nó 55, 2 de 6) vira bloco 2 de 6
+    tr_filter._handle_ws_msg({
+        "type": "progress",
+        "data": {
+            "prompt_id": "prompt_9",
+            "node": "55",
+            "value": 2,
+            "max": 6
+        }
+    })
+    assert tr_filter.current_chunk == 2 and tr_filter.total_chunks == 6, f"Esperado bloco 2 de 6, obteve {tr_filter.current_chunk} de {tr_filter.total_chunks}"
+    print(" [OK] Evento progress do nó sampler (2 de 6) atualizou para bloco 2 de 6.")
+
+    # 3. Evento progress com display_node=="55" (3 de 6) aceito
+    tr_filter._handle_ws_msg({
+        "type": "progress",
+        "data": {
+            "prompt_id": "prompt_9",
+            "display_node": "55",
+            "value": 3,
+            "max": 6
+        }
+    })
+    assert tr_filter.current_chunk == 3 and tr_filter.total_chunks == 6, f"Esperado bloco 3 de 6, obteve {tr_filter.current_chunk} de {tr_filter.total_chunks}"
+    print(" [OK] Evento progress via display_node atualizou para bloco 3 de 6.")
+
+    # 4. Total implausível (> 100) é ignorado
+    tr_filter._handle_ws_msg({
+        "type": "progress",
+        "data": {
+            "prompt_id": "prompt_9",
+            "node": "55",
+            "value": 34,
+            "max": 720
+        }
+    })
+    assert tr_filter.current_chunk == 3 and tr_filter.total_chunks == 6, "Total > 100 em progress não pode alterar chunk!"
+
+    tr_filter._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {
+            "prompt_id": "prompt_9",
+            "text": "Chunk 50 of 200: sampling"
+        }
+    })
+    assert tr_filter.current_chunk == 3 and tr_filter.total_chunks == 6, "Total > 100 em viggle.chunk_progress deve ser ignorado!"
+    print(" [OK] Totais de blocos implausíveis (> 100) foram ignorados com sucesso.")
+
+    # 5. Prioridade e exclusividade de viggle.chunk_progress vs progress interno de 3 passos
+    # Teste: progress (1 de 3) -> chunk_progress "Chunk 1 of 6" -> progress (2 de 3) -> chunk_progress "Chunk 2 of 6" deve terminar em bloco 2 de 6, sem alternar.
+    tr_seq = api.ComfyUIProgressTracker("http://127.0.0.1:8188", "client_seq", "prompt_seq", sampler_node_id="55")
+
+    # (a) progress (1 de 3) antes de qualquer chunk_progress: aceito
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 1, "max": 3}
+    })
+    assert tr_seq.current_chunk == 1 and tr_seq.total_chunks == 3
+    assert tr_seq.has_received_chunk_progress is False
+
+    # Tentativa de recuar bloco ou diminuir total antes do primeiro chunk_progress deve ser ignorada:
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 0, "max": 3}
+    })
+    assert tr_seq.current_chunk == 1, "Bloco não pode recuar!"
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 1, "max": 2}
+    })
+    assert tr_seq.total_chunks == 3, "Total não pode diminuir!"
+
+    # (b) chunk_progress "Chunk 1 of 6": passa a ser a única fonte
+    tr_seq._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {"prompt_id": "prompt_seq", "text": "Chunk 1 of 6: frames 0-123 carry 0 lat — sampling"}
+    })
+    assert tr_seq.current_chunk == 1 and tr_seq.total_chunks == 6
+    assert tr_seq.has_received_chunk_progress is True
+
+    # (c) progress (2 de 3) do sampler: NÃO pode alternar para bloco 2 de 3
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 2, "max": 3}
+    })
+    assert tr_seq.current_chunk == 1 and tr_seq.total_chunks == 6, f"Não pode alternar com progress do sampler! Obteve {tr_seq.current_chunk} de {tr_seq.total_chunks}"
+
+    # (d) chunk_progress "Chunk 2 of 6": atualiza para bloco 2 de 6
+    tr_seq._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {"prompt_id": "prompt_seq", "text": "Chunk 2 of 6: frames 100-223 carry 7 lat — sampling"}
+    })
+    assert tr_seq.current_chunk == 2 and tr_seq.total_chunks == 6
+    print(" [OK] Sequência progress (1 de 3) -> Chunk 1 of 6 -> progress (2 de 3) -> Chunk 2 of 6 terminou estritamente em bloco 2 de 6 sem alternância.")
+
+    # =========================================================================
+    # Teste 10: Resiliência em /history contra Delays (> 3s), TimeoutError e Falhas
+    # =========================================================================
+    print("\n--- Teste 10: Resiliência em /history contra Delays (> 3s), TimeoutError e Falhas ---")
+    tmp_task_dir = tempfile.mkdtemp(prefix="test_hist_")
+    from PIL import Image
+    sample_img = os.path.join(tmp_task_dir, "face.png")
+    Image.new("RGB", (256, 256), color=(200, 100, 50)).save(sample_img)
+    sample_vid = os.path.join(tmp_task_dir, "motion.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=256x256:rate=24", "-c:v", "libx264", "-pix_fmt", "yuv420p", sample_vid],
+        check=True, capture_output=True
+    )
+
+    try:
+        # 10a. /history demora > 3s várias vezes seguidas: tarefa NÃO falha e termina OK
+        MockComfyUISimulator.history_delay_count = 2
+        MockComfyUISimulator.history_delay_seconds = 3.2  # > 3 s
+        MockComfyUISimulator.simulate_oom = False
+        MockComfyUISimulator.simulate_error = False
+
+        tid_delay = "task_hist_delay"
+        api.TASKS[tid_delay] = {"task_id": tid_delay, "status": "started"}
+        t_work_delay = os.path.join(tmp_task_dir, tid_delay)
+        os.makedirs(t_work_delay, exist_ok=True)
+
+        api.background_viggle_worker(
+            tid_delay, t_work_delay, sample_img, sample_vid, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+        )
+        assert api.TASKS[tid_delay]["status"] == "completed", f"Status esperado 'completed', obteve {api.TASKS[tid_delay].get('status')}: {api.TASKS[tid_delay].get('error')}"
+        print(" [OK] /history com delay > 3s duas vezes seguidas: tarefa NÃO falhou e concluiu com status 'completed'.")
+
+        # 10b. /history sofre TimeoutError real (simulado reduzindo HISTORY_POLL_TIMEOUT_S)
+        orig_poll_timeout = api.HISTORY_POLL_TIMEOUT_S
+        try:
+            api.HISTORY_POLL_TIMEOUT_S = 0.2
+            MockComfyUISimulator.history_delay_count = 2
+            MockComfyUISimulator.history_delay_seconds = 0.5  # Excede 0.2s -> TimeoutError
+
+            tid_to = "task_hist_timeout"
+            api.TASKS[tid_to] = {"task_id": tid_to, "status": "started"}
+            t_work_to = os.path.join(tmp_task_dir, tid_to)
+            os.makedirs(t_work_to, exist_ok=True)
+
+            api.background_viggle_worker(
+                tid_to, t_work_to, sample_img, sample_vid, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+            )
+            assert api.TASKS[tid_to]["status"] == "completed", f"Tarefa deve sobreviver a TimeoutError: {api.TASKS[tid_to].get('error')}"
+            print(" [OK] /history sofreu TimeoutError repetido: worker tratou como 'ComfyUI ocupado' e concluiu OK.")
+        finally:
+            api.HISTORY_POLL_TIMEOUT_S = orig_poll_timeout
+
+        # 10c. /history sofre desconexão abrupta (RemoteDisconnected / OSError) e JSON inválido
+        MockComfyUISimulator.history_disconnect_count = 1
+        MockComfyUISimulator.history_invalid_json_count = 1
+        tid_err = "task_hist_glitch"
+        api.TASKS[tid_err] = {"task_id": tid_err, "status": "started"}
+        t_work_err = os.path.join(tmp_task_dir, tid_err)
+        os.makedirs(t_work_err, exist_ok=True)
+
+        api.background_viggle_worker(
+            tid_err, t_work_err, sample_img, sample_vid, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+        )
+        assert api.TASKS[tid_err]["status"] == "completed"
+        print(" [OK] /history com falha de conexão e JSON inválido: recuperado sem queda da tarefa.")
+
+    finally:
+        shutil.rmtree(tmp_task_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 11: Erro Real do ComfyUI Falha a Tarefa e Aciona POST /interrupt (Sem Órfãs)
+    # =========================================================================
+    print("\n--- Teste 11: Erro Real do ComfyUI Falha Tarefa e Aciona /interrupt ---")
+    tmp_err_dir = tempfile.mkdtemp(prefix="test_err_")
+    sample_img2 = os.path.join(tmp_err_dir, "face2.png")
+    Image.new("RGB", (256, 256), color=(100, 150, 200)).save(sample_img2)
+    sample_vid2 = os.path.join(tmp_err_dir, "motion2.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=256x256:rate=24", "-c:v", "libx264", "-pix_fmt", "yuv420p", sample_vid2],
+        check=True, capture_output=True
+    )
+
+    try:
+        MockComfyUISimulator.simulate_oom = False
+        MockComfyUISimulator.simulate_error = True
+        MockComfyUISimulator.error_message = "Tensor shape mismatch in ViggleChunkedSampler"
+        MockComfyUISimulator.interrupt_count = 0
+
+        tid_fail = "task_real_error"
+        api.TASKS[tid_fail] = {"task_id": tid_fail, "status": "started"}
+        t_work_fail = os.path.join(tmp_err_dir, tid_fail)
+        os.makedirs(t_work_fail, exist_ok=True)
+
+        api.background_viggle_worker(
+            tid_fail, t_work_fail, sample_img2, sample_vid2, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+        )
+        assert api.TASKS[tid_fail]["status"] in ("error", "failed"), f"Status esperado 'error'/'failed', obteve {api.TASKS[tid_fail].get('status')}"
+        assert "Tensor shape mismatch in ViggleChunkedSampler" in api.TASKS[tid_fail]["error"]
+        assert MockComfyUISimulator.interrupt_count >= 1, f"POST /interrupt deveria ter sido chamado no erro! Obteve {MockComfyUISimulator.interrupt_count}"
+        print(" [OK] Erro real do ComfyUI falhou a tarefa e acionou POST /interrupt imediatamente.")
+
+        # Teste cancelamento de tarefa
+        initial_int = MockComfyUISimulator.interrupt_count
+        tid_cancel = "task_to_cancel"
+        api.TASKS[tid_cancel] = {"task_id": tid_cancel, "status": "running"}
+        with api.app.test_request_context():
+            resp, code = api.cancel_task(tid_cancel)
+            assert code == 200
+            assert api.TASKS[tid_cancel]["status"] == "cancelled"
+            assert MockComfyUISimulator.interrupt_count == initial_int + 1
+        print(" [OK] Cancelamento de tarefa acionou POST /interrupt e marcou status 'cancelled'.")
+
+        # Teste inicialização do servidor (init_comfyui_session)
+        init_int_before = MockComfyUISimulator.interrupt_count
+        init_qc_before = MockComfyUISimulator.queue_clear_count
+        api.init_comfyui_session()
+        assert MockComfyUISimulator.interrupt_count == init_int_before + 1
+        assert MockComfyUISimulator.queue_clear_count == init_qc_before + 1
+        print(" [OK] init_comfyui_session enviou POST /interrupt e POST /queue com {'clear': True}.")
+
+    finally:
+        MockComfyUISimulator.simulate_error = False
+        shutil.rmtree(tmp_err_dir, ignore_errors=True)
 
     # Limpeza do diretório base de testes se criado
     if created_temp_root and os.path.exists(created_temp_root):
