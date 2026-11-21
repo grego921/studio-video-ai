@@ -426,6 +426,7 @@ class ComfyUIProgressTracker:
         self.current_chunk = None
         self.total_chunks = None
         self.chunk_text = ""
+        self.has_received_chunk_progress = False
         self.last_progress_time = time.time()
         self._stop_event = threading.Event()
         self._thread = None
@@ -550,6 +551,7 @@ class ComfyUIProgressTracker:
                 if tot <= 100:
                     self.current_chunk = c
                     self.total_chunks = tot
+                    self.has_received_chunk_progress = True
         elif mtype == "progress":
             node_id = data.get("node")
             if node_id is None:
@@ -560,6 +562,11 @@ class ComfyUIProgressTracker:
             if not self.sampler_node_id or node_str != str(self.sampler_node_id):
                 return
 
+            # Assim que chegar qualquer evento "viggle.chunk_progress" válido, ele passa a ser a
+            # ÚNICA fonte de current_chunk e total_chunks, e os eventos "progress" do sampler deixam de alterar o bloco.
+            if self.has_received_chunk_progress:
+                return
+
             v = data.get("value")
             m = data.get("max")
             if v is not None and m is not None:
@@ -568,8 +575,11 @@ class ComfyUIProgressTracker:
                     tot = int(m)
                     # Se o total de blocos for implausível (> 100), ignorar
                     if tot <= 100:
-                        self.current_chunk = c
-                        self.total_chunks = tot
+                        # Antes do primeiro "viggle.chunk_progress", ainda é aceitável usar "progress" do sampler,
+                        # mas o bloco nunca pode recuar e o total nunca pode diminuir.
+                        if (self.current_chunk is None or c >= self.current_chunk) and (self.total_chunks is None or tot >= self.total_chunks):
+                            self.current_chunk = c
+                            self.total_chunks = tot
                 except (ValueError, TypeError):
                     pass
         elif mtype in ("executing", "executed", "status"):
@@ -1450,7 +1460,7 @@ def background_viggle_worker(
                         tot_denom = tracker.total_chunks or max(1, tracker.current_chunk)
                         TASKS[task_id]["progress_pct"] = min(94.0, round((tracker.current_chunk / tot_denom) * 80.0 + 15.0, 1))
 
-                except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
+                except Exception:
                     pass
 
                 # (e) Timeout por ausência de progresso

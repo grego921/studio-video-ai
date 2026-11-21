@@ -508,30 +508,30 @@ def run_tests():
     print("\n--- Teste 6: Telemetria e Progresso de Blocos ---")
     tracker = api.ComfyUIProgressTracker("http://127.0.0.1:8188", "test_client", "test_prompt", sampler_node_id="55")
 
-    # Simular recebimento de evento viggle.chunk_progress
-    tracker._handle_ws_msg({
-        "type": "viggle.chunk_progress",
-        "data": {
-            "prompt_id": "test_prompt",
-            "text": "Chunk 3 of 8: frames 204-327, seed 44 carry 7 lat — sampling"
-        }
-    })
-    assert tracker.current_chunk == 3, f"Esperado chunk 3, obteve {tracker.current_chunk}"
-    assert tracker.total_chunks == 8, f"Esperado total 8, obteve {tracker.total_chunks}"
-    print(f" [OK] Tracker extraiu corretamente bloco {tracker.current_chunk} de {tracker.total_chunks}.")
-
-    # Simular evento de pbar (progress standard) do nó sampler
+    # 1. Simular evento de pbar (progress standard) do nó sampler antes de chunk_progress
     tracker._handle_ws_msg({
         "type": "progress",
         "data": {
             "prompt_id": "test_prompt",
             "node": "55",
-            "value": 4,
+            "value": 3,
             "max": 8
         }
     })
-    assert tracker.current_chunk == 4 and tracker.total_chunks == 8
+    assert tracker.current_chunk == 3 and tracker.total_chunks == 8, f"Esperado 3 de 8, obteve {tracker.current_chunk} de {tracker.total_chunks}"
     print(f" [OK] Tracker atualizou via progress event para bloco {tracker.current_chunk} de {tracker.total_chunks}.")
+
+    # 2. Simular recebimento de evento viggle.chunk_progress assumindo controle exclusivo
+    tracker._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {
+            "prompt_id": "test_prompt",
+            "text": "Chunk 4 of 8: frames 204-327, seed 44 carry 7 lat — sampling"
+        }
+    })
+    assert tracker.current_chunk == 4, f"Esperado chunk 4, obteve {tracker.current_chunk}"
+    assert tracker.total_chunks == 8, f"Esperado total 8, obteve {tracker.total_chunks}"
+    print(f" [OK] Tracker extraiu corretamente bloco {tracker.current_chunk} de {tracker.total_chunks} via viggle.chunk_progress.")
 
     # =========================================================================
     # Teste 7: Health Check com Workflow Longo Ausente (Requirement 4 & 5)
@@ -756,6 +756,53 @@ def run_tests():
     })
     assert tr_filter.current_chunk == 3 and tr_filter.total_chunks == 6, "Total > 100 em viggle.chunk_progress deve ser ignorado!"
     print(" [OK] Totais de blocos implausíveis (> 100) foram ignorados com sucesso.")
+
+    # 5. Prioridade e exclusividade de viggle.chunk_progress vs progress interno de 3 passos
+    # Teste: progress (1 de 3) -> chunk_progress "Chunk 1 of 6" -> progress (2 de 3) -> chunk_progress "Chunk 2 of 6" deve terminar em bloco 2 de 6, sem alternar.
+    tr_seq = api.ComfyUIProgressTracker("http://127.0.0.1:8188", "client_seq", "prompt_seq", sampler_node_id="55")
+
+    # (a) progress (1 de 3) antes de qualquer chunk_progress: aceito
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 1, "max": 3}
+    })
+    assert tr_seq.current_chunk == 1 and tr_seq.total_chunks == 3
+    assert tr_seq.has_received_chunk_progress is False
+
+    # Tentativa de recuar bloco ou diminuir total antes do primeiro chunk_progress deve ser ignorada:
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 0, "max": 3}
+    })
+    assert tr_seq.current_chunk == 1, "Bloco não pode recuar!"
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 1, "max": 2}
+    })
+    assert tr_seq.total_chunks == 3, "Total não pode diminuir!"
+
+    # (b) chunk_progress "Chunk 1 of 6": passa a ser a única fonte
+    tr_seq._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {"prompt_id": "prompt_seq", "text": "Chunk 1 of 6: frames 0-123 carry 0 lat — sampling"}
+    })
+    assert tr_seq.current_chunk == 1 and tr_seq.total_chunks == 6
+    assert tr_seq.has_received_chunk_progress is True
+
+    # (c) progress (2 de 3) do sampler: NÃO pode alternar para bloco 2 de 3
+    tr_seq._handle_ws_msg({
+        "type": "progress",
+        "data": {"prompt_id": "prompt_seq", "node": "55", "value": 2, "max": 3}
+    })
+    assert tr_seq.current_chunk == 1 and tr_seq.total_chunks == 6, f"Não pode alternar com progress do sampler! Obteve {tr_seq.current_chunk} de {tr_seq.total_chunks}"
+
+    # (d) chunk_progress "Chunk 2 of 6": atualiza para bloco 2 de 6
+    tr_seq._handle_ws_msg({
+        "type": "viggle.chunk_progress",
+        "data": {"prompt_id": "prompt_seq", "text": "Chunk 2 of 6: frames 100-223 carry 7 lat — sampling"}
+    })
+    assert tr_seq.current_chunk == 2 and tr_seq.total_chunks == 6
+    print(" [OK] Sequência progress (1 de 3) -> Chunk 1 of 6 -> progress (2 de 3) -> Chunk 2 of 6 terminou estritamente em bloco 2 de 6 sem alternância.")
 
     # =========================================================================
     # Teste 10: Resiliência em /history contra Delays (> 3s), TimeoutError e Falhas
