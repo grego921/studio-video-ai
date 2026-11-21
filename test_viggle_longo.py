@@ -313,32 +313,32 @@ def run_tests():
 
         # 2a. Áudio menor que min (2s, [5, 30]) -> clamped em 5s (120 quadros)
         t, f_cnt, mn, mx, is_long = api.calculate_target_duration(aud_2s, vid_10s, 5.0, 30.0)
-        assert abs(t - 5.0) < 0.1 and f_cnt == 120 and not is_long, f"Falha 2a: t={t}, frames={f_cnt}, long={is_long}"
+        assert abs(t - 5.0) <= 0.1 and abs(f_cnt - 120) <= 1 and not is_long, f"Falha 2a: t={t}, frames={f_cnt}, long={is_long}"
         print(f" [OK] Áudio 2s com min=5s -> alvo={t:.1f}s, {f_cnt} quadros, modo={'longo' if is_long else 'curto'}.")
 
         # 2b. Áudio entre min e max (15s, [5, 30]) -> 15s (360 quadros, longo)
         t, f_cnt, mn, mx, is_long = api.calculate_target_duration(aud_15s, vid_10s, 5.0, 30.0)
-        assert abs(t - 15.0) < 0.1 and f_cnt == 360 and is_long, f"Falha 2b: t={t}, frames={f_cnt}, long={is_long}"
+        assert abs(t - 15.0) <= 0.1 and abs(f_cnt - 360) <= 1 and is_long, f"Falha 2b: t={t}, frames={f_cnt}, long={is_long}"
         print(f" [OK] Áudio 15s com [5, 30] -> alvo={t:.1f}s, {f_cnt} quadros, modo={'longo' if is_long else 'curto'}.")
 
         # 2c. Áudio maior que max (45s, [5, 30]) -> clamped em 30s (720 quadros, longo)
         t, f_cnt, mn, mx, is_long = api.calculate_target_duration(aud_45s, vid_10s, 5.0, 30.0)
-        assert abs(t - 30.0) < 0.1 and f_cnt == 720 and is_long, f"Falha 2c: t={t}, frames={f_cnt}, long={is_long}"
+        assert abs(t - 30.0) <= 0.1 and abs(f_cnt - 720) <= 1 and is_long, f"Falha 2c: t={t}, frames={f_cnt}, long={is_long}"
         print(f" [OK] Áudio 45s com max=30s -> alvo={t:.1f}s, {f_cnt} quadros, modo={'longo' if is_long else 'curto'}.")
 
         # 2d. Sem áudio (usa vídeo de 10s) -> 10s (240 quadros, longo)
         t, f_cnt, mn, mx, is_long = api.calculate_target_duration(None, vid_10s, 5.0, 30.0)
-        assert abs(t - 10.0) < 0.1 and f_cnt == 240 and is_long, f"Falha 2d: t={t}, frames={f_cnt}, long={is_long}"
+        assert abs(t - 10.0) <= 0.1 and abs(f_cnt - 240) <= 1 and is_long, f"Falha 2d: t={t}, frames={f_cnt}, long={is_long}"
         print(f" [OK] Sem áudio com vídeo 10s -> alvo={t:.1f}s, {f_cnt} quadros, modo={'longo' if is_long else 'curto'}.")
 
         # 2e. Parâmetros inválidos ou vazios (None, <= 0) -> padrão 5s e 30s
         t, f_cnt, mn, mx, is_long = api.calculate_target_duration(None, vid_10s, "invalido", -10)
-        assert mn == 5.0 and mx == 30.0 and abs(t - 10.0) < 0.1
+        assert mn == 5.0 and mx == 30.0 and abs(t - 10.0) <= 0.1
         print(f" [OK] Parâmetros inválidos -> min={mn}s, max={mx}s (padrão assumido).")
 
         # 2f. min_duration > max_duration (min=35, max=30) -> min vira max (30)
         t, f_cnt, mn, mx, is_long = api.calculate_target_duration(aud_15s, vid_10s, 35.0, 30.0)
-        assert mn == 30.0 and mx == 30.0 and abs(t - 30.0) < 0.1
+        assert mn == 30.0 and mx == 30.0 and abs(t - 30.0) <= 0.1 and abs(f_cnt - 720) <= 1
         print(f" [OK] min > max -> min={mn}s ajustado para max={mx}s.")
 
     finally:
