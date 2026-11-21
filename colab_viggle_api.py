@@ -212,20 +212,23 @@ def is_runtime_upload_field(node: dict, ctype: str, param_name: str, param_spec)
 QUALITY_MAP = {
     "rapido": 0.4,
     "padrao": 0.7,
-    "alta": 1.0
+    "alta": 0.7  # Mantido apenas por compatibilidade, tratado como 'padrao' (0.7 MP)
 }
-DEFAULT_QUALITY = "rapido"
+DEFAULT_QUALITY = "padrao"
 OOM_ERROR_MESSAGE = "Memória da GPU insuficiente nesta qualidade. Tente 'Padrão' ou 'Rápido'."
 
 def parse_quality(val):
     """
-    Normaliza a qualidade de renderização para uma chave válida ('rapido', 'padrao', 'alta')
-    e seu respectivo valor em megapixels (0.4, 0.7, 1.0).
-    Padrão quando ausente ou inválido: 'rapido' (0.4 MP).
+    Normaliza a qualidade de renderização para uma chave válida ('rapido', 'padrao')
+    e seu respectivo valor em megapixels (0.4, 0.7).
+    'alta' é aceita por compatibilidade, mapeada para 'padrao' (0.7 MP).
+    Padrão quando ausente ou inválido: 'padrao' (0.7 MP).
     """
     if not val or not isinstance(val, str):
         return DEFAULT_QUALITY, QUALITY_MAP[DEFAULT_QUALITY]
     q_norm = val.strip().lower()
+    if q_norm == "alta":
+        return "padrao", 0.7
     if q_norm in QUALITY_MAP:
         return q_norm, QUALITY_MAP[q_norm]
     return DEFAULT_QUALITY, QUALITY_MAP[DEFAULT_QUALITY]
@@ -233,10 +236,17 @@ def parse_quality(val):
 def is_oom_error(err_data) -> bool:
     """
     Identifica se a mensagem ou exceção retornada é decorrente de falta de memória de GPU (OOM).
+    Utiliza busca de palavra inteira com limites (\boom\b) para evitar falsos positivos
+    com palavras como 'zoom' e 'room'.
     """
     if not err_data:
         return False
     txt = str(err_data).lower()
+
+    # Busca de palavra inteira para 'oom'
+    if re.search(r'\boom\b', txt):
+        return True
+
     patterns = [
         "out of memory",
         "outofmemoryerror",
@@ -245,8 +255,7 @@ def is_oom_error(err_data) -> bool:
         "memória da gpu insuficiente",
         "not enough memory",
         "allocate memory",
-        "allocation on device",
-        "oom"
+        "allocation on device"
     ]
     return any(p in txt for p in patterns)
 
@@ -647,7 +656,8 @@ def find_node_by_title(workflow, title):
                 return nid, node
     return None, None
 
-def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality="rapido"):
+def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality="padrao"):
+    was_alta = isinstance(quality, str) and quality.strip().lower() == "alta"
     quality_key, target_megapixels = parse_quality(quality)
     task_log_path = os.path.join(work_dir, "task_render.log")
     TASKS[task_id]["log_path"] = task_log_path
@@ -658,6 +668,8 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
         TASKS[task_id]["status"] = "processing"
         TASKS[task_id]["stage"] = "init"
         TASKS[task_id]["message"] = "Iniciando processamento Viggle-Animate..."
+        if was_alta:
+            append_task_log(task_log_path, "Qualidade 'alta' desativada, usando 'padrao'.")
         append_task_log(task_log_path, f"Iniciando tarefa {task_id} no motor Viggle-Animate (Qualidade: '{quality_key}', {target_megapixels} MP)")
 
         # 1. Redimensionar foto de entrada para max 1024px no lado maior
@@ -1170,7 +1182,7 @@ def generate_neural_video():
 
         t = threading.Thread(
             target=background_viggle_worker,
-            args=(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality_key),
+            args=(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality_raw),
             daemon=True
         )
         t.start()
