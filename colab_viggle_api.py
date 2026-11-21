@@ -118,6 +118,97 @@ def append_task_log(log_path, message):
     except Exception:
         pass
 
+def is_link_value(val) -> bool:
+    """Verifica se um valor de entrada é uma conexão/link para outro nó [node_id, slot]."""
+    return isinstance(val, list) and len(val) == 2 and isinstance(val[1], int) and isinstance(val[0], (str, int))
+
+def _extract_combo_items(raw_items) -> list:
+    """Normaliza itens de uma lista de opções de combo (strings, números, ou dicts com 'key')."""
+    res = []
+    for item in raw_items:
+        if isinstance(item, (str, int, float, bool)):
+            res.append(item)
+        elif isinstance(item, dict):
+            if "key" in item:
+                res.append(item["key"])
+            elif "value" in item:
+                res.append(item["value"])
+    return res
+
+def get_combo_options(param_spec):
+    """
+    Retorna a lista de opções permitidas se o parâmetro for do tipo combo (lista),
+    ou None caso contrário.
+
+    Trata os dois formatos de combo do /object_info do ComfyUI:
+    1. Lista direta: [[opções], {metadados}] ou [[opções]]
+    2. Formato COMBO nomeado: ["COMBO", {"options": [opções], ...}] ou ["COMBO", [opções]]
+    """
+    if not isinstance(param_spec, (list, tuple)) or len(param_spec) == 0:
+        return None
+
+    first = param_spec[0]
+
+    # Formato 2A: Tipo nomeado ("COMBO", "COMFY_DYNAMICCOMBO_V3", etc.)
+    if isinstance(first, str) and first.upper() in ("COMBO", "COMFY_DYNAMICCOMBO_V3"):
+        if len(param_spec) > 1:
+            if isinstance(param_spec[1], dict):
+                opts = param_spec[1].get("options")
+                if opts is None:
+                    opts = param_spec[1].get("values")
+                if isinstance(opts, (list, tuple)):
+                    return _extract_combo_items(opts)
+            elif isinstance(param_spec[1], (list, tuple)):
+                return _extract_combo_items(param_spec[1])
+        return None
+
+    # Formato 1: param_spec[0] é diretamente uma lista de opções
+    if isinstance(first, list):
+        # Tratar caso em que ["COMBO"] foi aninhado em lista com dict
+        if len(first) == 1 and isinstance(first[0], str) and first[0].upper() == "COMBO":
+            if len(param_spec) > 1 and isinstance(param_spec[1], dict):
+                opts = param_spec[1].get("options") or param_spec[1].get("values")
+                if isinstance(opts, (list, tuple)):
+                    return _extract_combo_items(opts)
+        return _extract_combo_items(first)
+
+    # Formato 2B: Qualquer especificação com dict contendo chave "options"
+    if len(param_spec) > 1 and isinstance(param_spec[1], dict):
+        opts = param_spec[1].get("options")
+        if isinstance(opts, (list, tuple)):
+            return _extract_combo_items(opts)
+
+    return None
+
+def is_runtime_upload_field(node: dict, ctype: str, param_name: str, param_spec) -> bool:
+    """
+    Verifica se um campo de combo representa um arquivo de upload que será
+    sobrescrito em tempo de execução (ex: INPUT_IMAGE, INPUT_VIDEO, LoadImage, VHS_LoadVideo).
+    Esses campos não devem ser validados estritamente contra as listas de arquivos
+    presentes na pasta de input do ComfyUI durante a inicialização / verificação de integridade.
+    """
+    title = (node.get("_meta", {}).get("title") or "") if isinstance(node, dict) else ""
+
+    # 1. Nós com títulos obrigatórios de entrada no workflow
+    if title == "INPUT_IMAGE" and param_name == "image":
+        return True
+    if title == "INPUT_VIDEO" and param_name == "video":
+        return True
+
+    # 2. Classes conhecidas de nós de upload de imagem e vídeo
+    if ctype in ("LoadImage", "LoadImageMask") and param_name == "image":
+        return True
+    if ctype in ("VHS_LoadVideo", "VHS_LoadVideoPath", "VHS_LoadImages", "LoadVideo") and param_name in ("video", "images", "file"):
+        return True
+
+    # 3. Metadados de upload na especificação do ComfyUI (ex: image_upload=True, video_upload=True)
+    if isinstance(param_spec, (list, tuple)) and len(param_spec) > 1 and isinstance(param_spec[1], dict):
+        meta = param_spec[1]
+        if meta.get("image_upload") or meta.get("video_upload") or meta.get("upload"):
+            return True
+
+    return False
+
 def validate_workflow_against_comfyui(workflow_path, comfy_url):
     problems = []
     if not os.path.exists(workflow_path):
@@ -155,7 +246,7 @@ def validate_workflow_against_comfyui(workflow_path, comfy_url):
         problems.append(f"Não foi possível consultar /object_info no ComfyUI ({comfy_url}): {str(e)}")
         return False, problems
 
-    # 3. Para cada nó do workflow: (a) class_type existe; (b) entradas required presentes
+    # 3. Para cada nó do workflow: (a) class_type existe; (b) entradas required presentes; (c) combos válidos
     for nid, node in workflow.items():
         ctype = node.get("class_type")
         if not ctype:
@@ -168,11 +259,33 @@ def validate_workflow_against_comfyui(workflow_path, comfy_url):
 
         node_info = object_info[ctype]
         req_inputs = node_info.get("input", {}).get("required", {})
+        opt_inputs = node_info.get("input", {}).get("optional", {})
         actual_inputs = node.get("inputs", {})
 
         for req_key in req_inputs.keys():
             if req_key not in actual_inputs:
                 problems.append(f"Nó [{nid}] ({ctype}): entrada obrigatória '{req_key}' ausente no workflow")
+
+        # Validar valores de campos do tipo lista (combo) contra as opções reais do object_info
+        all_specs = {}
+        all_specs.update(req_inputs)
+        if isinstance(opt_inputs, dict):
+            all_specs.update(opt_inputs)
+
+        for param_name, param_spec in all_specs.items():
+            # Pula campos sobrescritos em tempo de execução (upload de imagem/vídeo)
+            if is_runtime_upload_field(node, ctype, param_name, param_spec):
+                continue
+
+            allowed_opts = get_combo_options(param_spec)
+            if allowed_opts is not None and param_name in actual_inputs:
+                val = actual_inputs[param_name]
+                if not is_link_value(val):
+                    if val not in allowed_opts and str(val) not in [str(o) for o in allowed_opts]:
+                        problems.append(
+                            f"Nó [{nid}] ({ctype}), campo '{param_name}': valor '{val}' "
+                            f"não existe nas opções permitidas pelo ComfyUI. Opções válidas: {allowed_opts}"
+                        )
 
     is_valid = (len(problems) == 0)
     return is_valid, problems

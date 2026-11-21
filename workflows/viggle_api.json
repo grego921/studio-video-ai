@@ -90,7 +90,7 @@
   "11": {
     "inputs": {
       "model": [
-        "25",
+        "14",
         0
       ],
       "conditioning": [
@@ -218,24 +218,6 @@
     "class_type": "ModelAttentionBackend",
     "_meta": {
       "title": "ModelAttentionBackend"
-    }
-  },
-  "25": {
-    "inputs": {
-      "model": [
-        "14",
-        0
-      ],
-      "max_resolution": 360,
-      "jpeg_quality": 80,
-      "suppress_default_preview": true,
-      "preview_frames": 124,
-      "preview_fps": 12,
-      "tiny_vae": "taeh3.safetensors"
-    },
-    "class_type": "ModelPreviewOverrideKJ",
-    "_meta": {
-      "title": "ModelPreviewOverrideKJ"
     }
   },
   "26": {

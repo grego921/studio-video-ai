@@ -72,6 +72,101 @@ def is_widget_type(type_spec) -> bool:
     return False
 
 
+def is_link_value(val) -> bool:
+    """Verifica se um valor de entrada é uma conexão/link para outro nó [node_id, slot]."""
+    return isinstance(val, list) and len(val) == 2 and isinstance(val[1], int) and isinstance(val[0], (str, int))
+
+
+def _extract_combo_items(raw_items) -> list:
+    """Normaliza itens de uma lista de opções de combo (strings, números, ou dicts com 'key')."""
+    res = []
+    for item in raw_items:
+        if isinstance(item, (str, int, float, bool)):
+            res.append(item)
+        elif isinstance(item, dict):
+            if "key" in item:
+                res.append(item["key"])
+            elif "value" in item:
+                res.append(item["value"])
+    return res
+
+
+def get_combo_options(param_spec):
+    """
+    Retorna a lista de opções permitidas se o parâmetro for do tipo combo (lista),
+    ou None caso contrário.
+
+    Trata os dois formatos de combo do /object_info do ComfyUI:
+    1. Lista direta: [[opções], {metadados}] ou [[opções]]
+    2. Formato COMBO nomeado: ["COMBO", {"options": [opções], ...}] ou ["COMBO", [opções]]
+    """
+    if not isinstance(param_spec, (list, tuple)) or len(param_spec) == 0:
+        return None
+
+    first = param_spec[0]
+
+    # Formato 2A: Tipo nomeado ("COMBO", "COMFY_DYNAMICCOMBO_V3", etc.)
+    if isinstance(first, str) and first.upper() in ("COMBO", "COMFY_DYNAMICCOMBO_V3"):
+        if len(param_spec) > 1:
+            if isinstance(param_spec[1], dict):
+                opts = param_spec[1].get("options")
+                if opts is None:
+                    opts = param_spec[1].get("values")
+                if isinstance(opts, (list, tuple)):
+                    return _extract_combo_items(opts)
+            elif isinstance(param_spec[1], (list, tuple)):
+                return _extract_combo_items(param_spec[1])
+        return None
+
+    # Formato 1: param_spec[0] é diretamente uma lista de opções
+    if isinstance(first, list):
+        # Tratar caso em que ["COMBO"] foi aninhado em lista com dict
+        if len(first) == 1 and isinstance(first[0], str) and first[0].upper() == "COMBO":
+            if len(param_spec) > 1 and isinstance(param_spec[1], dict):
+                opts = param_spec[1].get("options") or param_spec[1].get("values")
+                if isinstance(opts, (list, tuple)):
+                    return _extract_combo_items(opts)
+        return _extract_combo_items(first)
+
+    # Formato 2B: Qualquer especificação com dict contendo chave "options"
+    if len(param_spec) > 1 and isinstance(param_spec[1], dict):
+        opts = param_spec[1].get("options")
+        if isinstance(opts, (list, tuple)):
+            return _extract_combo_items(opts)
+
+    return None
+
+
+def is_runtime_upload_field(node: dict, ctype: str, param_name: str, param_spec) -> bool:
+    """
+    Verifica se um campo de combo representa um arquivo de upload que será
+    sobrescrito em tempo de execução (ex: INPUT_IMAGE, INPUT_VIDEO, LoadImage, VHS_LoadVideo).
+    Esses campos não devem ser validados estritamente contra as listas de arquivos
+    presentes na pasta de input do ComfyUI durante a inicialização / verificação de integridade.
+    """
+    title = (node.get("_meta", {}).get("title") or "") if isinstance(node, dict) else ""
+
+    # 1. Nós com títulos obrigatórios de entrada no workflow
+    if title == "INPUT_IMAGE" and param_name == "image":
+        return True
+    if title == "INPUT_VIDEO" and param_name == "video":
+        return True
+
+    # 2. Classes conhecidas de nós de upload de imagem e vídeo
+    if ctype in ("LoadImage", "LoadImageMask") and param_name == "image":
+        return True
+    if ctype in ("VHS_LoadVideo", "VHS_LoadVideoPath", "VHS_LoadImages", "LoadVideo") and param_name in ("video", "images", "file"):
+        return True
+
+    # 3. Metadados de upload na especificação do ComfyUI (ex: image_upload=True, video_upload=True)
+    if isinstance(param_spec, (list, tuple)) and len(param_spec) > 1 and isinstance(param_spec[1], dict):
+        meta = param_spec[1]
+        if meta.get("image_upload") or meta.get("video_upload") or meta.get("upload"):
+            return True
+
+    return False
+
+
 def fetch_object_info(comfy_url: str) -> dict:
     """Obtém as definições de todos os nós registrados no ComfyUI."""
     url = f"{comfy_url.rstrip('/')}/object_info"
@@ -150,6 +245,14 @@ def resolve_link_source(link_id: int, node_map: dict, link_map: dict, visited: s
         if not inputs or inputs[0].get("link") is None:
             raise ValueError(f"Nó Reroute (ID {orig_id}) está desconectado na entrada.")
         return resolve_link_source(inputs[0]["link"], node_map, link_map, visited)
+
+    # Bypassar nós ModelPreviewOverrideKJ religando à sua entrada 'model'
+    if orig_type == "ModelPreviewOverrideKJ":
+        inputs = orig_node.get("inputs", [])
+        model_inputs = [i for i in inputs if i.get("name") == "model"]
+        if not model_inputs or model_inputs[0].get("link") is None:
+            raise ValueError(f"Nó ModelPreviewOverrideKJ (ID {orig_id}) está desconectado na entrada 'model'.")
+        return resolve_link_source(model_inputs[0]["link"], node_map, link_map, visited)
 
     # PrimitiveNode: repassar o valor fixado
     if orig_type == "PrimitiveNode":
@@ -364,13 +467,69 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
 
         api_workflow[str(nid)] = api_node
 
+    # -------------------------------------------------------------------------
+    # 5. Remoção genérica de nós de prévia de interface (ModelPreviewOverrideKJ)
+    # -------------------------------------------------------------------------
+    api_workflow = remove_model_preview_nodes(api_workflow)
+
     return api_workflow
 
 
-def validate_api_workflow(api_wf: dict, object_info: dict):
+def remove_model_preview_nodes(api_workflow: dict) -> dict:
+    """
+    Remove genericamente todos os nós ModelPreviewOverrideKJ do workflow API,
+    religando os nós consumidores da sua saída 'model' (slot 0) diretamente
+    à entrada 'model' do nó de prévia removido.
+    """
+    while True:
+        preview_nid = None
+        for nid, node in api_workflow.items():
+            if node.get("class_type") == "ModelPreviewOverrideKJ":
+                preview_nid = nid
+                break
+        if preview_nid is None:
+            break
+
+        preview_node = api_workflow[preview_nid]
+        upstream_model = preview_node.get("inputs", {}).get("model")
+        if upstream_model is None:
+            raise ValueError(
+                f"Nó ModelPreviewOverrideKJ [{preview_nid}] não possui entrada 'model' para religação."
+            )
+
+        # Religar consumidores que apontam para [preview_nid, 0]
+        relinked_count = 0
+        for nid, node in api_workflow.items():
+            if nid == preview_nid:
+                continue
+            for iname, ival in list(node.get("inputs", {}).items()):
+                if isinstance(ival, list) and len(ival) == 2:
+                    if str(ival[0]) == str(preview_nid) and ival[1] == 0:
+                        node["inputs"][iname] = upstream_model
+                        relinked_count += 1
+                        log_info(
+                            f"Religada entrada '{iname}' do nó [{nid}] ({node.get('class_type')}): "
+                            f"[{preview_nid}, 0] -> {upstream_model}"
+                        )
+
+        del api_workflow[preview_nid]
+        log_info(
+            f"Nó ModelPreviewOverrideKJ [{preview_nid}] removido com sucesso do workflow "
+            f"({relinked_count} conexão(ões) religada(s))."
+        )
+
+    return api_workflow
+
+
+def validate_api_workflow(api_wf: dict, object_info: dict, raise_on_error: bool = True):
     """
     Validação estrita do workflow gerado contra as regras do sistema e o object_info do ComfyUI.
     Garante 100% de certeza antes de salvar.
+    Valida:
+    1. Presença dos 3 títulos obrigatórios (INPUT_IMAGE, INPUT_VIDEO, SEED)
+    2. Existência do class_type no ComfyUI
+    3. Presença de todas as entradas obrigatórias (required)
+    4. Conformidade dos valores de campos combo contra as opções reais do ComfyUI (/object_info)
     """
     errors = []
 
@@ -386,23 +545,52 @@ def validate_api_workflow(api_wf: dict, object_info: dict):
         if req_title not in found_titles:
             errors.append(f"Título obrigatório '{req_title}' não encontrado em nenhum nó do workflow.")
 
-    # 2. Validar que cada nó possui class_type existente e todas as entradas obrigatórias
+    # 2. Validar que cada nó possui class_type existente, entradas obrigatórias e combos válidos
     for nid, node in api_wf.items():
         ctype = node.get("class_type")
         if not ctype or ctype not in object_info:
             errors.append(f"Nó [{nid}]: class_type '{ctype}' não existe no ComfyUI.")
             continue
 
-        req_inputs = object_info[ctype].get("input", {}).get("required", {})
+        node_info = object_info[ctype]
+        req_inputs = node_info.get("input", {}).get("required", {})
+        opt_inputs = node_info.get("input", {}).get("optional", {})
+        actual_inputs = node.get("inputs", {})
+
         for req_k in req_inputs.keys():
-            if req_k not in node.get("inputs", {}):
+            if req_k not in actual_inputs:
                 errors.append(f"Nó [{nid}] ({ctype}): entrada obrigatória '{req_k}' está ausente.")
+
+        # Validar valores de campos do tipo lista (combo) contra as opções reais do object_info
+        all_specs = {}
+        all_specs.update(req_inputs)
+        if isinstance(opt_inputs, dict):
+            all_specs.update(opt_inputs)
+
+        for param_name, param_spec in all_specs.items():
+            # Pula campos sobrescritos em tempo de execução (upload de imagem/vídeo)
+            if is_runtime_upload_field(node, ctype, param_name, param_spec):
+                continue
+
+            allowed_opts = get_combo_options(param_spec)
+            if allowed_opts is not None and param_name in actual_inputs:
+                val = actual_inputs[param_name]
+                if not is_link_value(val):
+                    if val not in allowed_opts and str(val) not in [str(o) for o in allowed_opts]:
+                        errors.append(
+                            f"Nó [{nid}] ({ctype}), campo '{param_name}': valor '{val}' "
+                            f"não existe nas opções permitidas pelo ComfyUI. Opções válidas: {allowed_opts}"
+                        )
 
     if errors:
         log_err("Falhas na validação do workflow gerado:")
         for err in errors:
             log_err(f"  - {err}")
-        raise ValueError(f"Workflow API inválido ({len(errors)} problemas detectados). Abortando.")
+        if raise_on_error:
+            raise ValueError(f"Workflow API inválido ({len(errors)} problemas detectados). Abortando.")
+        return False, errors
+
+    return True, []
 
 
 def main():
