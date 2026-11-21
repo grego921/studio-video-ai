@@ -50,6 +50,18 @@ DEFAULT_CANDIDATE_PATHS = [
     "temp_comfyui/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-v1.2.0.json",
 ]
 
+CHUNKED_WORKFLOW_URL = (
+    "https://raw.githubusercontent.com/Saganaki22/ComfyUI-Viggle-Animate-H3/main/"
+    "example_workflows/viggle-animate-h3_workflow-chunked-sampler.json"
+)
+
+CHUNKED_CANDIDATE_PATHS = [
+    "workflows/viggle-animate-h3_workflow-chunked-sampler.json",
+    "custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-chunked-sampler.json",
+    "/content/ComfyUI/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-chunked-sampler.json",
+    "temp_comfyui/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-chunked-sampler.json",
+]
+
 
 def log_info(msg: str):
     print(f"[build_workflow] {msg}")
@@ -186,7 +198,7 @@ def fetch_object_info(comfy_url: str) -> dict:
         sys.exit(1)
 
 
-def load_ui_workflow(source_path_or_url: str) -> dict:
+def load_ui_workflow(source_path_or_url: str, is_chunked: bool = False) -> dict:
     """Carrega o JSON do workflow de interface a partir de arquivo local ou URL."""
     # 1. Se o caminho fornecido existir diretamente:
     if source_path_or_url and os.path.exists(source_path_or_url):
@@ -201,16 +213,20 @@ def load_ui_workflow(source_path_or_url: str) -> dict:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    # 3. Tentar os caminhos padrão conhecidos:
-    for candidate in DEFAULT_CANDIDATE_PATHS:
+    # 3. Detectar se busca chunked/longo
+    candidate_paths = CHUNKED_CANDIDATE_PATHS if is_chunked else DEFAULT_CANDIDATE_PATHS
+    fallback_url = CHUNKED_WORKFLOW_URL if is_chunked else DEFAULT_WORKFLOW_URL
+
+    # Tentar os caminhos padrão conhecidos:
+    for candidate in candidate_paths:
         if os.path.exists(candidate):
             log_info(f"Carregando workflow do caminho padrão: {candidate}")
             with open(candidate, "r", encoding="utf-8") as f:
                 return json.load(f)
 
     # 4. Fallback: baixar do GitHub oficial
-    log_info(f"Arquivo local não encontrado. Baixando do repositório oficial: {DEFAULT_WORKFLOW_URL}")
-    req = urllib.request.Request(DEFAULT_WORKFLOW_URL, headers={"User-Agent": "BuildViggleWorkflow/1.0"})
+    log_info(f"Arquivo local não encontrado. Baixando do repositório oficial: {fallback_url}")
+    req = urllib.request.Request(fallback_url, headers={"User-Agent": "BuildViggleWorkflow/1.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -296,7 +312,7 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
 
                     if src_res[0] != "PRIMITIVE":
                         src_node = node_map.get(src_res[0])
-                        if src_node and src_node.get("type") == "VAEDecode":
+                        if src_node and src_node.get("type") in ("VAEDecode", "ViggleChunkedSampler"):
                             primary_output_id = n["id"]
                             break
 
@@ -304,7 +320,7 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
         raise ValueError(
             f"Não foi possível identificar com 100% de certeza o nó VHS_VideoCombine primário. "
             f"Nós VHS_VideoCombine encontrados: {all_video_combines}. "
-            f"Nenhum deles possui a entrada 'images' conectada diretamente a um VAEDecode."
+            f"Nenhum deles possui a entrada 'images' conectada diretamente a um VAEDecode ou ViggleChunkedSampler."
         )
 
     log_info(f"Nó de saída primária identificado: VHS_VideoCombine ID {primary_output_id}")
@@ -446,11 +462,28 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
 
         elif ctype == "VHS_LoadVideo":
             api_node["_meta"]["title"] = "INPUT_VIDEO"
-            api_node["inputs"]["frame_load_cap"] = 124
+            api_node["inputs"].setdefault("frame_load_cap", 124)
             api_node["inputs"]["skip_first_frames"] = 0
 
         elif ctype == "RandomNoise":
             api_node["_meta"]["title"] = "SEED"
+
+        elif ctype == "ViggleChunkedSampler":
+            api_node["_meta"]["title"] = "SEED"
+            api_node["inputs"]["rerender_chunk"] = 0
+            api_node["inputs"]["rerender_seed"] = 0
+
+        elif ctype == "CustomSigmas":
+            api_node["inputs"]["sigmas_string"] = "1.0, 0.8571428571428571, 0.6, 0.0"
+            api_node["inputs"]["interpolate_to_steps"] = 3
+
+        elif ctype == "KSamplerSelect":
+            api_node["inputs"]["sampler_name"] = "euler"
+
+        elif ctype == "ViggleAnimateConditioningWindowed":
+            api_node["inputs"]["chunk_frames"] = 124
+            api_node["inputs"]["continuation"] = "five_frame_anchor"
+            api_node["inputs"]["overlap_frames"] = 22
 
         elif ctype == "LoraLoaderModelOnly":
             api_node["inputs"]["lora_name"] = "viggle_animate_dmd_lora_r64.safetensors"
@@ -628,16 +661,20 @@ def main():
         description="Converte o workflow UI oficial do Viggle-Animate para o formato API do ComfyUI."
     )
     parser.add_argument(
+        "--source",
         "--workflow-in",
+        dest="workflow_in",
         type=str,
         default="",
-        help="Caminho local ou URL do arquivo viggle-animate-h3_workflow-v1.2.0.json",
+        help="Caminho local, URL ou preset ('chunked'/'longo') do workflow de interface",
     )
     parser.add_argument(
+        "--output",
         "--workflow-out",
+        dest="workflow_out",
         type=str,
-        default="workflows/viggle_api.json",
-        help="Caminho de saída para o workflow API (default: workflows/viggle_api.json)",
+        default="",
+        help="Caminho de saída para o workflow API (default: workflows/viggle_api.json ou workflows/viggle_longo_api.json)",
     )
     parser.add_argument(
         "--comfy-url",
@@ -648,8 +685,18 @@ def main():
 
     args = parser.parse_args()
 
+    # Detectar preset chunked/longo
+    in_lower = args.workflow_in.lower()
+    out_lower = args.workflow_out.lower()
+    is_chunked = ("chunked" in in_lower or "longo" in in_lower or "chunked" in out_lower or "longo" in out_lower)
+
+    if not args.workflow_out:
+        args.workflow_out = "workflows/viggle_longo_api.json" if is_chunked else "workflows/viggle_api.json"
+
     print("=" * 75)
     print("🛠️  BUILD VIGGLE WORKFLOW: GERADOR DE WORKFLOW API COMFYUI")
+    print(f"🎯 Modo selecionado: {'LONGO (Chunked Sampler)' if is_chunked else 'PADRÃO / CURTO (Single-pass)'}")
+    print(f"📂 Arquivo de saída: {args.workflow_out}")
     print("=" * 75)
 
     # 1. Consultar /object_info
@@ -657,7 +704,7 @@ def main():
 
     # 2. Carregar workflow UI
     try:
-        wf_ui = load_ui_workflow(args.workflow_in)
+        wf_ui = load_ui_workflow(args.workflow_in, is_chunked=is_chunked)
     except Exception as e:
         log_err(f"Erro ao carregar workflow de interface: {e}")
         sys.exit(1)
