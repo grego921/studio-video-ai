@@ -118,6 +118,34 @@ def append_task_log(log_path, message):
     except Exception:
         pass
 
+def is_link_value(val) -> bool:
+    """Verifica se um valor de entrada é uma conexão/link para outro nó [node_id, slot]."""
+    return isinstance(val, list) and len(val) == 2 and isinstance(val[1], int) and isinstance(val[0], (str, int))
+
+def get_combo_options(param_spec):
+    """
+    Retorna a lista de opções permitidas se o parâmetro for do tipo combo (lista),
+    ou None caso contrário.
+    """
+    if not isinstance(param_spec, (list, tuple)) or len(param_spec) == 0:
+        return None
+    # No ComfyUI padrão, campos combo têm param_spec[0] como lista de opções
+    # Exemplo: [["none", "taeh3.safetensors"], {"default": "none"}]
+    if isinstance(param_spec[0], list):
+        return param_spec[0]
+    # Caso alternativo/custom: ["COMBO", {"options": [...]}]
+    if len(param_spec) > 1 and isinstance(param_spec[1], dict):
+        if "options" in param_spec[1] and isinstance(param_spec[1]["options"], list):
+            opts = param_spec[1]["options"]
+            res = []
+            for o in opts:
+                if isinstance(o, (str, int, float, bool)):
+                    res.append(o)
+                elif isinstance(o, dict) and "key" in o:
+                    res.append(o["key"])
+            return res
+    return None
+
 def validate_workflow_against_comfyui(workflow_path, comfy_url):
     problems = []
     if not os.path.exists(workflow_path):
@@ -155,7 +183,7 @@ def validate_workflow_against_comfyui(workflow_path, comfy_url):
         problems.append(f"Não foi possível consultar /object_info no ComfyUI ({comfy_url}): {str(e)}")
         return False, problems
 
-    # 3. Para cada nó do workflow: (a) class_type existe; (b) entradas required presentes
+    # 3. Para cada nó do workflow: (a) class_type existe; (b) entradas required presentes; (c) combos válidos
     for nid, node in workflow.items():
         ctype = node.get("class_type")
         if not ctype:
@@ -168,11 +196,29 @@ def validate_workflow_against_comfyui(workflow_path, comfy_url):
 
         node_info = object_info[ctype]
         req_inputs = node_info.get("input", {}).get("required", {})
+        opt_inputs = node_info.get("input", {}).get("optional", {})
         actual_inputs = node.get("inputs", {})
 
         for req_key in req_inputs.keys():
             if req_key not in actual_inputs:
                 problems.append(f"Nó [{nid}] ({ctype}): entrada obrigatória '{req_key}' ausente no workflow")
+
+        # Validar valores de campos do tipo lista (combo) contra as opções reais do object_info
+        all_specs = {}
+        all_specs.update(req_inputs)
+        if isinstance(opt_inputs, dict):
+            all_specs.update(opt_inputs)
+
+        for param_name, param_spec in all_specs.items():
+            allowed_opts = get_combo_options(param_spec)
+            if allowed_opts is not None and param_name in actual_inputs:
+                val = actual_inputs[param_name]
+                if not is_link_value(val):
+                    if val not in allowed_opts and str(val) not in [str(o) for o in allowed_opts]:
+                        problems.append(
+                            f"Nó [{nid}] ({ctype}), campo '{param_name}': valor '{val}' "
+                            f"não existe nas opções permitidas pelo ComfyUI. Opções válidas: {allowed_opts}"
+                        )
 
     is_valid = (len(problems) == 0)
     return is_valid, problems
