@@ -209,6 +209,95 @@ def is_runtime_upload_field(node: dict, ctype: str, param_name: str, param_spec)
 
     return False
 
+QUALITY_MAP = {
+    "rapido": 0.4,
+    "padrao": 0.7,
+    "alta": 1.0
+}
+DEFAULT_QUALITY = "rapido"
+OOM_ERROR_MESSAGE = "Memória da GPU insuficiente nesta qualidade. Tente 'Padrão' ou 'Rápido'."
+
+def parse_quality(val):
+    """
+    Normaliza a qualidade de renderização para uma chave válida ('rapido', 'padrao', 'alta')
+    e seu respectivo valor em megapixels (0.4, 0.7, 1.0).
+    Padrão quando ausente ou inválido: 'rapido' (0.4 MP).
+    """
+    if not val or not isinstance(val, str):
+        return DEFAULT_QUALITY, QUALITY_MAP[DEFAULT_QUALITY]
+    q_norm = val.strip().lower()
+    if q_norm in QUALITY_MAP:
+        return q_norm, QUALITY_MAP[q_norm]
+    return DEFAULT_QUALITY, QUALITY_MAP[DEFAULT_QUALITY]
+
+def is_oom_error(err_data) -> bool:
+    """
+    Identifica se a mensagem ou exceção retornada é decorrente de falta de memória de GPU (OOM).
+    """
+    if not err_data:
+        return False
+    txt = str(err_data).lower()
+    patterns = [
+        "out of memory",
+        "outofmemoryerror",
+        "cuda out of memory",
+        "cuda error: out of memory",
+        "memória da gpu insuficiente",
+        "not enough memory",
+        "allocate memory",
+        "allocation on device",
+        "oom"
+    ]
+    return any(p in txt for p in patterns)
+
+def get_video_resolution(video_path):
+    """
+    Obtém a resolução 'LxA' (ex: 720x1280) de um arquivo de vídeo gerado
+    utilizando ffprobe, cv2 ou fallback ffmpeg.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return "Desconhecida"
+
+    # 1. ffprobe
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
+            video_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            d = res.stdout.strip().splitlines()[0].strip()
+            if "x" in d:
+                return d
+    except Exception:
+        pass
+
+    # 2. cv2
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if cap.isOpened():
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            if w > 0 and h > 0:
+                return f"{w}x{h}"
+    except Exception:
+        pass
+
+    # 3. ffmpeg -i
+    try:
+        cmd = ["ffmpeg", "-i", video_path]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        m = re.search(r'Stream #.*?: Video:.*? (\d{2,5})x(\d{2,5})', res.stderr)
+        if m:
+            return f"{m.group(1)}x{m.group(2)}"
+    except Exception:
+        pass
+
+    return "Desconhecida"
+
 def extract_tail_exception_message(err_data, max_chars=800) -> str:
     """
     Extrai o final da mensagem de exceção (os últimos max_chars caracteres),
@@ -558,15 +647,18 @@ def find_node_by_title(workflow, title):
                 return nid, node
     return None, None
 
-def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio):
+def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality="rapido"):
+    quality_key, target_megapixels = parse_quality(quality)
     task_log_path = os.path.join(work_dir, "task_render.log")
     TASKS[task_id]["log_path"] = task_log_path
+    TASKS[task_id]["quality"] = quality_key
+    TASKS[task_id]["megapixels"] = target_megapixels
 
     try:
         TASKS[task_id]["status"] = "processing"
         TASKS[task_id]["stage"] = "init"
         TASKS[task_id]["message"] = "Iniciando processamento Viggle-Animate..."
-        append_task_log(task_log_path, f"Iniciando tarefa {task_id} no motor Viggle-Animate")
+        append_task_log(task_log_path, f"Iniciando tarefa {task_id} no motor Viggle-Animate (Qualidade: '{quality_key}', {target_megapixels} MP)")
 
         # 1. Redimensionar foto de entrada para max 1024px no lado maior
         temp_img = os.path.join(work_dir, "input_character.png")
@@ -663,6 +755,16 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                 node_seed["inputs"]["seed"] = new_seed
             append_task_log(task_log_path, f"Nó SEED [{nid_seed}] configurado com semente {new_seed}")
 
+        # JWImageResizeToMegapixels (Qualidade / Megapixels)
+        resize_node_id = None
+        for nid, n in workflow.items():
+            if isinstance(n, dict) and n.get("class_type") == "JWImageResizeToMegapixels":
+                resize_node_id = nid
+                n.setdefault("inputs", {})["megapixels"] = target_megapixels
+                append_task_log(task_log_path, f"Nó JWImageResizeToMegapixels [{nid}] configurado com megapixels={target_megapixels} (qualidade: {quality_key})")
+        if not resize_node_id:
+            append_task_log(task_log_path, f"Aviso: Nó com class_type 'JWImageResizeToMegapixels' não encontrado no workflow para aplicar qualidade '{quality_key}' ({target_megapixels} MP)")
+
         # 6. Enfileirar prompt no ComfyUI (/prompt)
         client_id = f"viggle_studio_{task_id}"
         prompt_payload = json.dumps({"prompt": workflow, "client_id": client_id}).encode("utf-8")
@@ -707,12 +809,18 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
             else:
                 full_msg = f"Erro HTTP {he.code} ao enfileirar no ComfyUI: {he.reason}"
 
+            if is_oom_error(full_msg):
+                append_task_log(task_log_path, f"❌ Erro ao enviar prompt: {OOM_ERROR_MESSAGE}")
+                raise RuntimeError(OOM_ERROR_MESSAGE)
+
             append_task_log(task_log_path, f"❌ Erro ao enviar prompt: {full_msg}")
             raise RuntimeError(full_msg)
 
         prompt_id = prompt_res.get("prompt_id")
         if not prompt_id:
             err_msg = prompt_res.get("error", "ComfyUI não retornou prompt_id")
+            if is_oom_error(err_msg):
+                raise RuntimeError(OOM_ERROR_MESSAGE)
             raise RuntimeError(f"Erro ao enfileirar no ComfyUI: {err_msg}")
 
         TASKS[task_id]["prompt_id"] = prompt_id
@@ -727,6 +835,22 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
         completed = False
         execution_error = None
         outputs = {}
+        min_vram_free_gb = None
+        last_vram_poll_time = 0.0
+
+        # Checagem inicial de VRAM via /system_stats
+        try:
+            init_sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
+            with urllib.request.urlopen(init_sreq, timeout=2.0) as is_resp:
+                is_data = json.loads(is_resp.read().decode("utf-8"))
+                for dev in is_data.get("devices", []):
+                    vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
+                    if vf is not None:
+                        free_gb = round(float(vf) / (1024 ** 3), 2)
+                        if min_vram_free_gb is None or free_gb < min_vram_free_gb:
+                            min_vram_free_gb = free_gb
+        except Exception:
+            pass
 
         while not completed:
             time.sleep(1.0)
@@ -755,6 +879,9 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                     for msg in messages:
                         if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
                             tail_err = extract_tail_exception_message(msg[1], max_chars=800)
+                            if is_oom_error(tail_err) or is_oom_error(str(msg[1])):
+                                append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {OOM_ERROR_MESSAGE}")
+                                raise RuntimeError(OOM_ERROR_MESSAGE)
                             append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
                             raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
 
@@ -762,11 +889,30 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                         for msg in messages:
                             if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
                                 tail_err = extract_tail_exception_message(msg[1], max_chars=800)
+                                if is_oom_error(tail_err) or is_oom_error(str(msg[1])):
+                                    append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {OOM_ERROR_MESSAGE}")
+                                    raise RuntimeError(OOM_ERROR_MESSAGE)
                                 append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
                                 raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
                         raise RuntimeError(f"ComfyUI reportou erro na execução do prompt {prompt_id}")
             except urllib.error.URLError:
                 pass
+
+            # (c) Consulta periódica a /system_stats para monitorar menor VRAM livre
+            if (now - last_vram_poll_time) >= 2.0:
+                last_vram_poll_time = now
+                try:
+                    sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
+                    with urllib.request.urlopen(sreq, timeout=2.0) as s_resp:
+                        s_data = json.loads(s_resp.read().decode("utf-8"))
+                        for dev in s_data.get("devices", []):
+                            vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
+                            if vf is not None:
+                                free_gb = round(float(vf) / (1024 ** 3), 2)
+                                if min_vram_free_gb is None or free_gb < min_vram_free_gb:
+                                    min_vram_free_gb = free_gb
+                except Exception:
+                    pass
 
             # (c) Consulta fila atual para telemetria de nó e progresso
             try:
@@ -901,6 +1047,9 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
 
         out_filename = os.path.basename(final_video_path)
         size_mb = round(os.path.getsize(final_video_path) / (1024 * 1024), 2)
+        total_time_s = round(time.time() - start_time, 1)
+        final_resolution = get_video_resolution(final_video_path)
+        vram_log_str = f"{min_vram_free_gb:.2f} GB" if min_vram_free_gb is not None else "Não disponível"
 
         # Preenchimento ANTES de marcar como completed
         TASKS[task_id]["filename"] = out_filename
@@ -912,17 +1061,30 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
         TASKS[task_id]["progress_pct"] = 100.0
         TASKS[task_id]["message"] = "Vídeo finalizado com sucesso pelo Viggle-Animate!"
         TASKS[task_id]["aviso_audio"] = has_audio
+        TASKS[task_id]["resolution"] = final_resolution
+        TASKS[task_id]["total_time_s"] = total_time_s
+        TASKS[task_id]["min_vram_free_gb"] = min_vram_free_gb
         TASKS[task_id]["status"] = "completed"
 
+        append_task_log(
+            task_log_path,
+            f"📊 Estatísticas da tarefa: qualidade='{quality_key}' ({target_megapixels} MP), "
+            f"resolução={final_resolution}, tempo_total={total_time_s}s, menor_vram_livre={vram_log_str}"
+        )
         append_task_log(task_log_path, f"🎉 Concluído com sucesso! Vídeo: {out_filename} ({size_mb} MB)")
 
     except Exception as e:
+        err_raw = str(e)
+        if is_oom_error(err_raw):
+            user_msg = OOM_ERROR_MESSAGE
+        else:
+            user_msg = f"Falha na renderização Viggle: {err_raw}"
         TASKS[task_id]["status"] = "error"
-        TASKS[task_id]["error"] = str(e)
-        TASKS[task_id]["message"] = f"Falha na renderização Viggle: {str(e)}"
+        TASKS[task_id]["error"] = user_msg
+        TASKS[task_id]["message"] = user_msg
         TASKS[task_id]["finished_at"] = time.time()
         TASKS[task_id]["proc_alive"] = False
-        append_task_log(task_log_path, f"❌ ERRO na tarefa {task_id}: {str(e)}")
+        append_task_log(task_log_path, f"❌ ERRO na tarefa {task_id}: {user_msg}")
 
 @app.route('/api/generate_neural_video', methods=['POST'])
 def generate_neural_video():
@@ -984,6 +1146,8 @@ def generate_neural_video():
                     audio_path = None
 
         aspect_ratio = request.form.get('aspect_ratio', 'original').lower()
+        quality_raw = request.form.get('quality')
+        quality_key, target_megapixels = parse_quality(quality_raw)
 
         TASKS[task_id] = {
             "task_id": task_id,
@@ -999,12 +1163,14 @@ def generate_neural_video():
             "step_total": None,
             "eta": None,
             "aviso_audio": bool(audio_path),
+            "quality": quality_key,
+            "megapixels": target_megapixels,
             "log_path": os.path.join(work_dir, "task_render.log")
         }
 
         t = threading.Thread(
             target=background_viggle_worker,
-            args=(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio),
+            args=(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality_key),
             daemon=True
         )
         t.start()
@@ -1064,6 +1230,17 @@ def task_status(task_id):
 
     if task.get("error"):
         resp["error"] = task.get("error")
+
+    if "quality" in task:
+        resp["quality"] = task["quality"]
+    if "megapixels" in task:
+        resp["megapixels"] = task["megapixels"]
+    if "resolution" in task:
+        resp["resolution"] = task["resolution"]
+    if "total_time_s" in task:
+        resp["total_time_s"] = task["total_time_s"]
+    if "min_vram_free_gb" in task:
+        resp["min_vram_free_gb"] = task["min_vram_free_gb"]
 
     if task.get("status") == "completed":
         resp["filename"] = task.get("filename")
