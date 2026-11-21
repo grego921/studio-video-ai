@@ -326,6 +326,9 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
             continue
 
         for inp in curr_node.get("inputs", []):
+            # Ignorar conexão de áudio no VHS_VideoCombine para não acoplar extração de áudio
+            if curr_node.get("type") == "VHS_VideoCombine" and inp.get("name") == "audio":
+                continue
             lid = inp.get("link")
             if lid is not None:
                 src_res = resolve_link_source(lid, node_map, link_map)
@@ -375,6 +378,9 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
         # a) Mapear conexões originadas de links
         for inp in n.get("inputs", []):
             iname = inp.get("name")
+            # Ignorar conexão de áudio no VHS_VideoCombine para evitar extração de áudio pelo VHS_LoadVideo
+            if ctype == "VHS_VideoCombine" and iname == "audio":
+                continue
             lid = inp.get("link")
             if lid is not None:
                 src_res = resolve_link_source(lid, node_map, link_map)
@@ -462,8 +468,10 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
             if "text_cond_name" in req_spec:
                 api_node["inputs"]["text_cond_name"] = "fixed_embed_fwd_anyframe.safetensors"
 
-        elif ctype == "VHS_VideoCombine" and nid == primary_output_id:
-            api_node["inputs"]["save_output"] = True
+        elif ctype == "VHS_VideoCombine":
+            if nid == primary_output_id:
+                api_node["inputs"]["save_output"] = True
+            api_node["inputs"].pop("audio", None)
 
         api_workflow[str(nid)] = api_node
 
@@ -472,6 +480,28 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
     # -------------------------------------------------------------------------
     api_workflow = remove_model_preview_nodes(api_workflow)
 
+    # -------------------------------------------------------------------------
+    # 6. Remoção genérica de conexões de áudio no VHS_VideoCombine
+    # -------------------------------------------------------------------------
+    api_workflow = remove_video_combine_audio(api_workflow)
+
+    return api_workflow
+
+
+def remove_video_combine_audio(api_workflow: dict) -> dict:
+    """
+    Remove genericamente a entrada 'audio' de todos os nós VHS_VideoCombine,
+    evitando que o VHS_LoadVideo tente extrair áudio do vídeo de movimento/referência.
+    """
+    removed_count = 0
+    for nid, node in api_workflow.items():
+        if node.get("class_type") == "VHS_VideoCombine":
+            if "audio" in node.get("inputs", {}):
+                del node["inputs"]["audio"]
+                removed_count += 1
+                log_info(f"Entrada 'audio' removida do nó VHS_VideoCombine [{nid}].")
+    if removed_count:
+        log_info(f"Total de {removed_count} nó(s) VHS_VideoCombine tiveram a entrada 'audio' removida.")
     return api_workflow
 
 
