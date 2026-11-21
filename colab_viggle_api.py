@@ -209,6 +209,31 @@ def is_runtime_upload_field(node: dict, ctype: str, param_name: str, param_spec)
 
     return False
 
+def extract_tail_exception_message(err_data, max_chars=800) -> str:
+    """
+    Extrai o final da mensagem de exceção (os últimos max_chars caracteres),
+    evitando que cabeçalhos extensos de ferramentas como ffmpeg ocultem a causa raiz.
+    Retorna uma mensagem formatada com identificação do nó e o final da mensagem.
+    """
+    if isinstance(err_data, dict):
+        node_id = err_data.get("node_id", "?")
+        node_type = err_data.get("node_type", "Desconhecido")
+        exc_type = err_data.get("exception_type", "Exception")
+        raw_msg = str(err_data.get("exception_message") or "")
+
+        if len(raw_msg) > max_chars:
+            tail = raw_msg[-max_chars:]
+            formatted_msg = f"...{tail}"
+        else:
+            formatted_msg = raw_msg
+
+        return f"Nó [{node_id}] ({node_type} - {exc_type}): {formatted_msg}"
+
+    raw_str = str(err_data)
+    if len(raw_str) > max_chars:
+        return f"...{raw_str[-max_chars:]}"
+    return raw_str
+
 def validate_workflow_against_comfyui(workflow_path, comfy_url):
     problems = []
     if not os.path.exists(workflow_path):
@@ -729,8 +754,17 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                     messages = status_info.get("messages", [])
                     for msg in messages:
                         if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
-                            execution_error = str(msg[1])
-                            raise RuntimeError(f"Erro na execução dos nós ComfyUI: {execution_error}")
+                            tail_err = extract_tail_exception_message(msg[1], max_chars=800)
+                            append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
+                            raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
+
+                    if status_info.get("status_str") == "error":
+                        for msg in messages:
+                            if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
+                                tail_err = extract_tail_exception_message(msg[1], max_chars=800)
+                                append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
+                                raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
+                        raise RuntimeError(f"ComfyUI reportou erro na execução do prompt {prompt_id}")
             except urllib.error.URLError:
                 pass
 
@@ -841,10 +875,20 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                 final_video_path
             ]
             res_aud = subprocess.run(cmd_audio, capture_output=True, text=True)
-            if res_aud.returncode != 0 or not os.path.exists(final_video_path):
-                append_task_log(task_log_path, f"Aviso ao mixar áudio: {res_aud.stderr}. Mantendo sem áudio.")
-                shutil.copy2(task_out_mp4, final_video_path)
+            if res_aud.returncode != 0 or not os.path.exists(final_video_path) or os.path.getsize(final_video_path) == 0:
+                # Fallback re-encodando caso a cópia direta de stream falhe
+                cmd_fallback = [
+                    "ffmpeg", "-y", "-i", task_out_mp4, "-i", audio_path,
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                    final_video_path
+                ]
+                res_fb = subprocess.run(cmd_fallback, capture_output=True, text=True)
+                if res_fb.returncode != 0 or not os.path.exists(final_video_path) or os.path.getsize(final_video_path) == 0:
+                    append_task_log(task_log_path, f"Aviso ao mixar áudio: {res_aud.stderr or res_fb.stderr}. Mantendo sem áudio.")
+                    shutil.copy2(task_out_mp4, final_video_path)
         else:
+            # Sem áudio do usuário: vídeo final sai sem áudio e a geração NÃO falha
             shutil.copy2(task_out_mp4, final_video_path)
 
         # 10. Ajuste de Aspect Ratio (TikTok / YouTube) se solicitado
