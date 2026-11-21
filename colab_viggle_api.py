@@ -122,29 +122,92 @@ def is_link_value(val) -> bool:
     """Verifica se um valor de entrada é uma conexão/link para outro nó [node_id, slot]."""
     return isinstance(val, list) and len(val) == 2 and isinstance(val[1], int) and isinstance(val[0], (str, int))
 
+def _extract_combo_items(raw_items) -> list:
+    """Normaliza itens de uma lista de opções de combo (strings, números, ou dicts com 'key')."""
+    res = []
+    for item in raw_items:
+        if isinstance(item, (str, int, float, bool)):
+            res.append(item)
+        elif isinstance(item, dict):
+            if "key" in item:
+                res.append(item["key"])
+            elif "value" in item:
+                res.append(item["value"])
+    return res
+
 def get_combo_options(param_spec):
     """
     Retorna a lista de opções permitidas se o parâmetro for do tipo combo (lista),
     ou None caso contrário.
+
+    Trata os dois formatos de combo do /object_info do ComfyUI:
+    1. Lista direta: [[opções], {metadados}] ou [[opções]]
+    2. Formato COMBO nomeado: ["COMBO", {"options": [opções], ...}] ou ["COMBO", [opções]]
     """
     if not isinstance(param_spec, (list, tuple)) or len(param_spec) == 0:
         return None
-    # No ComfyUI padrão, campos combo têm param_spec[0] como lista de opções
-    # Exemplo: [["none", "taeh3.safetensors"], {"default": "none"}]
-    if isinstance(param_spec[0], list):
-        return param_spec[0]
-    # Caso alternativo/custom: ["COMBO", {"options": [...]}]
+
+    first = param_spec[0]
+
+    # Formato 2A: Tipo nomeado ("COMBO", "COMFY_DYNAMICCOMBO_V3", etc.)
+    if isinstance(first, str) and first.upper() in ("COMBO", "COMFY_DYNAMICCOMBO_V3"):
+        if len(param_spec) > 1:
+            if isinstance(param_spec[1], dict):
+                opts = param_spec[1].get("options")
+                if opts is None:
+                    opts = param_spec[1].get("values")
+                if isinstance(opts, (list, tuple)):
+                    return _extract_combo_items(opts)
+            elif isinstance(param_spec[1], (list, tuple)):
+                return _extract_combo_items(param_spec[1])
+        return None
+
+    # Formato 1: param_spec[0] é diretamente uma lista de opções
+    if isinstance(first, list):
+        # Tratar caso em que ["COMBO"] foi aninhado em lista com dict
+        if len(first) == 1 and isinstance(first[0], str) and first[0].upper() == "COMBO":
+            if len(param_spec) > 1 and isinstance(param_spec[1], dict):
+                opts = param_spec[1].get("options") or param_spec[1].get("values")
+                if isinstance(opts, (list, tuple)):
+                    return _extract_combo_items(opts)
+        return _extract_combo_items(first)
+
+    # Formato 2B: Qualquer especificação com dict contendo chave "options"
     if len(param_spec) > 1 and isinstance(param_spec[1], dict):
-        if "options" in param_spec[1] and isinstance(param_spec[1]["options"], list):
-            opts = param_spec[1]["options"]
-            res = []
-            for o in opts:
-                if isinstance(o, (str, int, float, bool)):
-                    res.append(o)
-                elif isinstance(o, dict) and "key" in o:
-                    res.append(o["key"])
-            return res
+        opts = param_spec[1].get("options")
+        if isinstance(opts, (list, tuple)):
+            return _extract_combo_items(opts)
+
     return None
+
+def is_runtime_upload_field(node: dict, ctype: str, param_name: str, param_spec) -> bool:
+    """
+    Verifica se um campo de combo representa um arquivo de upload que será
+    sobrescrito em tempo de execução (ex: INPUT_IMAGE, INPUT_VIDEO, LoadImage, VHS_LoadVideo).
+    Esses campos não devem ser validados estritamente contra as listas de arquivos
+    presentes na pasta de input do ComfyUI durante a inicialização / verificação de integridade.
+    """
+    title = (node.get("_meta", {}).get("title") or "") if isinstance(node, dict) else ""
+
+    # 1. Nós com títulos obrigatórios de entrada no workflow
+    if title == "INPUT_IMAGE" and param_name == "image":
+        return True
+    if title == "INPUT_VIDEO" and param_name == "video":
+        return True
+
+    # 2. Classes conhecidas de nós de upload de imagem e vídeo
+    if ctype in ("LoadImage", "LoadImageMask") and param_name == "image":
+        return True
+    if ctype in ("VHS_LoadVideo", "VHS_LoadVideoPath", "VHS_LoadImages", "LoadVideo") and param_name in ("video", "images", "file"):
+        return True
+
+    # 3. Metadados de upload na especificação do ComfyUI (ex: image_upload=True, video_upload=True)
+    if isinstance(param_spec, (list, tuple)) and len(param_spec) > 1 and isinstance(param_spec[1], dict):
+        meta = param_spec[1]
+        if meta.get("image_upload") or meta.get("video_upload") or meta.get("upload"):
+            return True
+
+    return False
 
 def validate_workflow_against_comfyui(workflow_path, comfy_url):
     problems = []
@@ -210,6 +273,10 @@ def validate_workflow_against_comfyui(workflow_path, comfy_url):
             all_specs.update(opt_inputs)
 
         for param_name, param_spec in all_specs.items():
+            # Pula campos sobrescritos em tempo de execução (upload de imagem/vídeo)
+            if is_runtime_upload_field(node, ctype, param_name, param_spec):
+                continue
+
             allowed_opts = get_combo_options(param_spec)
             if allowed_opts is not None and param_name in actual_inputs:
                 val = actual_inputs[param_name]
