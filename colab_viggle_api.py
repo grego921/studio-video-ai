@@ -11,6 +11,8 @@ import uuid
 import json
 import re
 import shutil
+import socket
+import struct
 import threading
 import subprocess
 import urllib.request
@@ -35,6 +37,7 @@ COMFYUI_DIR = os.environ.get("COMFYUI_DIR", os.path.abspath("/content/ComfyUI"))
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 RESULTS_DIR = os.environ.get("RESULTS_DIR", os.path.abspath("/content/output_videos"))
 WORKFLOW_API_PATH = os.environ.get("WORKFLOW_API_PATH", os.path.abspath("workflows/viggle_api.json"))
+WORKFLOW_LONGO_API_PATH = os.environ.get("WORKFLOW_LONGO_API_PATH", os.path.abspath("workflows/viggle_longo_api.json"))
 
 MODELS_DIR = os.path.join(COMFYUI_DIR, "models")
 DRIVE_MODELS_DIR = os.environ.get("DRIVE_MODELS_DIR", os.path.abspath("/content/drive/MyDrive/StudioVideoAI/models"))
@@ -216,6 +219,7 @@ QUALITY_MAP = {
 }
 DEFAULT_QUALITY = "padrao"
 OOM_ERROR_MESSAGE = "Memória da GPU insuficiente nesta qualidade. Tente 'Padrão' ou 'Rápido'."
+OOM_ERROR_MESSAGE_LONGO = "Memória da GPU insuficiente nesta qualidade ou duração. Tente reduzir a duração máxima ou usar qualidade 'Rápido'."
 
 def parse_quality(val):
     """
@@ -306,6 +310,246 @@ def get_video_resolution(video_path):
         pass
 
     return "Desconhecida"
+
+def get_media_duration(file_path: str) -> float:
+    """
+    Obtém a duração em segundos de um arquivo de mídia (áudio ou vídeo)
+    utilizando ffprobe, cv2 ou fallback ffmpeg.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return 0.0
+
+    # 1. ffprobe format=duration
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            val = float(res.stdout.strip().splitlines()[0].strip())
+            if val > 0:
+                return val
+    except Exception:
+        pass
+
+    # 2. cv2 para vídeo
+    try:
+        import cv2
+        cap = cv2.VideoCapture(file_path)
+        if cap.isOpened():
+            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+            fc = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+            cap.release()
+            if fps > 0 and fc > 0:
+                return float(fc / fps)
+    except Exception:
+        pass
+
+    # 3. ffmpeg -i parsing duration
+    try:
+        cmd = ["ffmpeg", "-i", file_path]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        m = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', res.stderr)
+        if m:
+            h, m_min, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+            return h * 3600 + m_min * 60 + s
+    except Exception:
+        pass
+
+    return 0.0
+
+def calculate_target_duration(audio_path, video_path, min_duration_raw=5.0, max_duration_raw=30.0):
+    """
+    Regra de duração mandatória:
+    1. Parse de min_duration e max_duration:
+       - Padrão: 5.0 e 30.0 segundos.
+       - Valores inválidos (None, <= 0, não-numéricos) usam o padrão.
+       - Se min > max, min = max.
+    2. Determinação do alvo:
+       - Alvo = duração do áudio do usuário, se enviado e válido (> 0s).
+       - Senão, a duração do vídeo de referência.
+       - Se ambos forem ausentes/inválidos, alvo cai em min_duration.
+    3. Clamping do alvo:
+       - Limitado estritamente ao intervalo [min_duration, max_duration].
+    4. Conversão para 24 fps:
+       - target_frames = int(round(alvo_clamped * 24)).
+       - Mínimo de 1 quadro.
+    Retorna: (alvo_clamped, target_frames, min_d, max_d, is_long_mode)
+    onde is_long_mode = (target_frames > 124).
+    """
+    try:
+        min_d = float(min_duration_raw)
+        if min_d <= 0:
+            min_d = 5.0
+    except (TypeError, ValueError):
+        min_d = 5.0
+
+    try:
+        max_d = float(max_duration_raw)
+        if max_d <= 0:
+            max_d = 30.0
+    except (TypeError, ValueError):
+        max_d = 30.0
+
+    if min_d > max_d:
+        min_d = max_d
+
+    audio_dur = get_media_duration(audio_path) if audio_path else 0.0
+    if audio_dur > 0.0:
+        raw_target = audio_dur
+    else:
+        video_dur = get_media_duration(video_path) if video_path else 0.0
+        raw_target = video_dur if video_dur > 0.0 else min_d
+
+    clamped_target = max(min_d, min(raw_target, max_d))
+    target_frames = max(1, int(round(clamped_target * 24)))
+    is_long_mode = (target_frames > 124)
+
+    return clamped_target, target_frames, min_d, max_d, is_long_mode
+
+class ComfyUIProgressTracker:
+    """
+    Escuta eventos do ComfyUI via WebSocket (/ws?clientId=...) em background thread.
+    Extrai informações de progresso de blocos ("bloco X de Y") e reseta o timestamp
+    de atividade na virada de cada bloco.
+    """
+    def __init__(self, comfy_url: str, client_id: str, prompt_id: str):
+        self.comfy_url = comfy_url.rstrip("/")
+        self.client_id = client_id
+        self.prompt_id = prompt_id
+        self.current_chunk = None
+        self.total_chunks = None
+        self.chunk_text = ""
+        self.last_progress_time = time.time()
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def _run(self):
+        import urllib.parse
+        try:
+            parsed = urllib.parse.urlparse(self.comfy_url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            path = f"{parsed.path or ''}/ws?clientId={self.client_id}"
+
+            s = socket.create_connection((host, port), timeout=3.0)
+            if parsed.scheme == "https":
+                import ssl
+                ctx = ssl.create_default_context()
+                s = ctx.wrap_socket(s, server_hostname=host)
+
+            s.settimeout(2.0)
+            key = "dGhlIHNhbXBsZSBub25jZQ=="
+            req = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Upgrade: websocket\r\n"
+                f"Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                f"Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            s.sendall(req.encode("utf-8"))
+
+            header_data = b""
+            while b"\r\n\r\n" not in header_data:
+                chunk = s.recv(1024)
+                if not chunk:
+                    return
+                header_data += chunk
+
+            if b"101 " not in header_data:
+                return
+
+            buf = header_data.split(b"\r\n\r\n", 1)[1]
+
+            while not self._stop_event.is_set():
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+
+                while len(buf) >= 2:
+                    b1, b2 = buf[0], buf[1]
+                    opcode = b1 & 0x0F
+                    payload_len = b2 & 0x7F
+                    offset = 2
+                    if payload_len == 126:
+                        if len(buf) < 4:
+                            break
+                        payload_len = struct.unpack("!H", buf[2:4])[0]
+                        offset = 4
+                    elif payload_len == 127:
+                        if len(buf) < 10:
+                            break
+                        payload_len = struct.unpack("!Q", buf[2:10])[0]
+                        offset = 10
+
+                    if len(buf) < offset + payload_len:
+                        break
+
+                    payload = buf[offset:offset + payload_len]
+                    buf = buf[offset + payload_len:]
+
+                    if opcode == 0x01:
+                        try:
+                            msg = json.loads(payload.decode("utf-8", errors="ignore"))
+                            self._handle_ws_msg(msg)
+                        except Exception:
+                            pass
+                    elif opcode == 0x08:
+                        return
+        except Exception:
+            pass
+        finally:
+            if 's' in locals() and s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    def _handle_ws_msg(self, msg: dict):
+        mtype = msg.get("type")
+        data = msg.get("data", {})
+        if not isinstance(data, dict):
+            return
+
+        msg_prompt_id = data.get("prompt_id")
+        if msg_prompt_id and msg_prompt_id != self.prompt_id:
+            return
+
+        now = time.time()
+        if mtype == "viggle.chunk_progress":
+            self.last_progress_time = now
+            text = str(data.get("text", ""))
+            self.chunk_text = text
+            m = re.search(r'Chunk\s+(\d+)\s+of\s+(\d+)', text, re.IGNORECASE)
+            if m:
+                self.current_chunk = int(m.group(1))
+                self.total_chunks = int(m.group(2))
+        elif mtype == "progress":
+            self.last_progress_time = now
+            v = data.get("value")
+            m = data.get("max")
+            if v is not None and m is not None:
+                self.current_chunk = int(v)
+                self.total_chunks = int(m)
+        elif mtype in ("executing", "executed", "status"):
+            self.last_progress_time = now
 
 def extract_tail_exception_message(err_data, max_chars=800) -> str:
     """
@@ -465,6 +709,15 @@ def check_environment_health():
 
     wf_valid, wf_problems = validate_workflow_against_comfyui(WORKFLOW_API_PATH, COMFYUI_URL)
 
+    longo_exists = os.path.exists(WORKFLOW_LONGO_API_PATH)
+    longo_valid = False
+    if not longo_exists:
+        wf_problems.append(f"[Longo] arquivo não encontrado: {WORKFLOW_LONGO_API_PATH}")
+    else:
+        longo_valid, longo_probs = validate_workflow_against_comfyui(WORKFLOW_LONGO_API_PATH, COMFYUI_URL)
+        if not longo_valid:
+            wf_problems.extend([f"[Longo] {p}" for p in longo_probs])
+
     ready = bool(
         comfy_ok and
         cuda_ok and
@@ -474,7 +727,9 @@ def check_environment_health():
         ckpt_text_cond_ok and
         ckpt_vae_ok and
         workflow_exists and
-        wf_valid
+        longo_exists and
+        wf_valid and
+        longo_valid
     )
 
     return {
@@ -487,8 +742,8 @@ def check_environment_health():
         "checkpoint_lora": ckpt_lora_ok,
         "checkpoint_text_cond": ckpt_text_cond_ok,
         "checkpoint_vae": ckpt_vae_ok,
-        "workflow_exists": workflow_exists,
-        "workflow_valid": wf_valid,
+        "workflow_exists": bool(workflow_exists and longo_exists),
+        "workflow_valid": bool(wf_valid and longo_valid),
         "workflow_problems": wf_problems,
         "gpu": gpu_name,
         "engine": "Viggle-Animate H3 (ComfyUI A100 Engine v1.0)",
@@ -571,8 +826,12 @@ def convert_video_aspect_ratio(input_video, output_video, ratio='original'):
 
 def trim_motion_video(input_path, output_path, max_frames=124):
     """
-    Verifica e limita o vídeo de movimento a no máximo max_frames (124 quadros, ~5s a 24fps).
-    Retorna (caminho_final, foi_cortado, total_frames).
+    Processa o vídeo de movimento para coincidir com max_frames (a 24 fps):
+    1. Normaliza para 24 fps.
+    2. Se tiver mais quadros que max_frames: corta para max_frames.
+    3. Se tiver menos quadros que max_frames: repete em vai-e-volta (ping-pong)
+       até atingir max_frames.
+    Retorna (output_path, foi_ajustado, total_frames_originais).
     """
     total_frames = 0
     try:
@@ -584,17 +843,112 @@ def trim_motion_video(input_path, output_path, max_frames=124):
     except Exception:
         total_frames = 0
 
-    if total_frames > max_frames:
-        cmd = [
-            "ffmpeg", "-y", "-i", input_path,
+    work_dir = os.path.dirname(os.path.abspath(output_path))
+    norm_path = os.path.join(work_dir, f"temp_norm24_{uuid.uuid4().hex[:8]}.mp4")
+
+    cmd_norm = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", "fps=24",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        norm_path
+    ]
+    res_norm = subprocess.run(cmd_norm, capture_output=True, text=True)
+    if res_norm.returncode != 0 or not os.path.exists(norm_path) or os.path.getsize(norm_path) == 0:
+        return input_path, False, total_frames
+
+    norm_frames = 0
+    try:
+        cmd_count = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-count_packets", "-show_entries", "stream=nb_read_packets",
+            "-of", "csv=p=0", norm_path
+        ]
+        res_c = subprocess.run(cmd_count, capture_output=True, text=True, timeout=10)
+        if res_c.returncode == 0 and res_c.stdout.strip():
+            norm_frames = int(res_c.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        pass
+
+    if norm_frames <= 0:
+        try:
+            import cv2
+            cap = cv2.VideoCapture(norm_path)
+            if cap.isOpened():
+                norm_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap.release()
+        except Exception:
+            pass
+
+    if norm_frames <= 0:
+        norm_frames = total_frames
+
+    # Caso 1: Quadros suficientes ou em excesso -> Cortar para max_frames a 24fps
+    if norm_frames >= max_frames:
+        cmd_trim = [
+            "ffmpeg", "-y", "-i", norm_path,
             "-vframes", str(max_frames),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p",
+            "-pix_fmt", "yuv420p", "-r", "24",
             output_path
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            return output_path, True, total_frames
+        subprocess.run(cmd_trim, capture_output=True, text=True)
+
+        if os.path.exists(norm_path):
+            try:
+                os.remove(norm_path)
+            except Exception:
+                pass
+
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return output_path, "trimmed", norm_frames
+        return input_path, False, total_frames
+
+    # Caso 2: Menos quadros que o alvo -> Repetir em vai-e-volta (ping-pong)
+    rev_path = os.path.join(work_dir, f"temp_rev24_{uuid.uuid4().hex[:8]}.mp4")
+    cmd_rev = [
+        "ffmpeg", "-y", "-i", norm_path,
+        "-vf", "reverse",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        rev_path
+    ]
+    subprocess.run(cmd_rev, capture_output=True, text=True)
+
+    concat_txt = os.path.join(work_dir, f"concat_{uuid.uuid4().hex[:8]}.txt")
+    try:
+        items = []
+        forward = True
+        accum = 0
+        while accum < max_frames:
+            fpath = norm_path if forward else rev_path
+            fpath_esc = fpath.replace("\\", "/").replace("'", "'\\''")
+            items.append(f"file '{fpath_esc}'")
+            forward = not forward
+            accum += norm_frames
+
+        with open(concat_txt, "w", encoding="utf-8") as cf:
+            cf.write("\n".join(items))
+
+        cmd_concat = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", concat_txt,
+            "-vframes", str(max_frames),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-r", "24",
+            output_path
+        ]
+        subprocess.run(cmd_concat, capture_output=True, text=True)
+    finally:
+        for p in (norm_path, rev_path, concat_txt):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        return output_path, "pingpong", norm_frames
 
     return input_path, False, total_frames
 
@@ -656,7 +1010,10 @@ def find_node_by_title(workflow, title):
                 return nid, node
     return None, None
 
-def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality="padrao"):
+def background_viggle_worker(
+    task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio,
+    quality="padrao", min_duration=5.0, max_duration=30.0
+):
     was_alta = isinstance(quality, str) and quality.strip().lower() == "alta"
     quality_key, target_megapixels = parse_quality(quality)
     task_log_path = os.path.join(work_dir, "task_render.log")
@@ -664,13 +1021,32 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
     TASKS[task_id]["quality"] = quality_key
     TASKS[task_id]["megapixels"] = target_megapixels
 
+    # Regra de duração
+    clamped_target, target_frames, min_d, max_d, is_long_mode = calculate_target_duration(
+        audio_path, motion_video_path, min_duration, max_duration
+    )
+    workflow_mode = "longo" if is_long_mode else "curto"
+    oom_msg = OOM_ERROR_MESSAGE_LONGO if is_long_mode else OOM_ERROR_MESSAGE
+    TASKS[task_id]["workflow_mode"] = workflow_mode
+    TASKS[task_id]["target_duration"] = clamped_target
+    TASKS[task_id]["target_frames"] = target_frames
+
     try:
         TASKS[task_id]["status"] = "processing"
         TASKS[task_id]["stage"] = "init"
         TASKS[task_id]["message"] = "Iniciando processamento Viggle-Animate..."
         if was_alta:
             append_task_log(task_log_path, "Qualidade 'alta' desativada, usando 'padrao'.")
-        append_task_log(task_log_path, f"Iniciando tarefa {task_id} no motor Viggle-Animate (Qualidade: '{quality_key}', {target_megapixels} MP)")
+        append_task_log(
+            task_log_path,
+            f"Iniciando tarefa {task_id} no motor Viggle-Animate "
+            f"(Qualidade: '{quality_key}', {target_megapixels} MP, Modo: '{workflow_mode}')"
+        )
+        append_task_log(
+            task_log_path,
+            f"⏱️ Regra de duração: alvo={clamped_target:.2f}s ({target_frames} quadros a 24fps) "
+            f"[min={min_d}s, max={max_d}s]. Workflow: {workflow_mode.upper()}."
+        )
 
         # 1. Redimensionar foto de entrada para max 1024px no lado maior
         temp_img = os.path.join(work_dir, "input_character.png")
@@ -694,14 +1070,27 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
             append_task_log(task_log_path, f"Aviso ao processar imagem: {e_im}")
             shutil.copy2(image_path, temp_img)
 
-        # 2. Limitar vídeo de movimento a no máximo 124 quadros (~5s)
+        # 2. Processar vídeo de movimento para coincidir com a duração-alvo
         temp_motion = os.path.join(work_dir, "input_motion.mp4")
-        final_motion_path, was_trimmed, orig_frames = trim_motion_video(motion_video_path, temp_motion, max_frames=124)
-        if was_trimmed:
-            append_task_log(task_log_path, f"⚠️ Vídeo de movimento cortado: {orig_frames} quadros reduzidos para 124 quadros (~5s).")
-            TASKS[task_id]["message"] = "Vídeo de movimento ajustado para 124 quadros (~5s)."
+        final_motion_path, action, orig_frames = trim_motion_video(
+            motion_video_path, temp_motion, max_frames=target_frames
+        )
+        if action == "trimmed":
+            append_task_log(
+                task_log_path,
+                f"⚠️ Vídeo de movimento cortado: {orig_frames} quadros reduzidos para "
+                f"{target_frames} quadros ({clamped_target:.1f}s a 24fps)."
+            )
+            TASKS[task_id]["message"] = f"Vídeo de movimento cortado para {target_frames} quadros ({clamped_target:.1f}s)."
+        elif action == "pingpong":
+            append_task_log(
+                task_log_path,
+                f"🔁 Vídeo de movimento repetido em vai-e-volta (ping-pong): {orig_frames} quadros expandidos "
+                f"para {target_frames} quadros ({clamped_target:.1f}s a 24fps)."
+            )
+            TASKS[task_id]["message"] = f"Vídeo de movimento repetido em vai-e-volta até {target_frames} quadros."
         else:
-            append_task_log(task_log_path, f"Vídeo de movimento validado com {orig_frames} quadros.")
+            append_task_log(task_log_path, f"Vídeo de movimento validado com {orig_frames} quadros a 24fps.")
 
         # 3. Enviar foto e vídeo para o ComfyUI (/upload/image)
         TASKS[task_id]["stage"] = "upload"
@@ -713,11 +1102,12 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
         vid_comfy_ref = f"{vid_sub}/{vid_name}" if vid_sub else vid_name
         append_task_log(task_log_path, f"Mídias preparadas no ComfyUI: imagem='{img_comfy_ref}', vídeo='{vid_comfy_ref}'")
 
-        # 4. Carregar workflow em formato API
-        if not os.path.exists(WORKFLOW_API_PATH):
-            raise FileNotFoundError(f"Arquivo de workflow não encontrado: {WORKFLOW_API_PATH}")
+        # 4. Carregar workflow correspondente ao modo
+        wf_path = WORKFLOW_LONGO_API_PATH if is_long_mode else WORKFLOW_API_PATH
+        if not os.path.exists(wf_path):
+            raise FileNotFoundError(f"Arquivo de workflow não encontrado: {wf_path}")
 
-        with open(WORKFLOW_API_PATH, "r", encoding="utf-8") as wf_f:
+        with open(wf_path, "r", encoding="utf-8") as wf_f:
             raw_wf = json.load(wf_f)
 
         # Remove campos de instruções que não são nós
@@ -747,16 +1137,17 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                     break
         if node_vid:
             node_vid["inputs"]["video"] = vid_comfy_ref
-            node_vid["inputs"]["frame_load_cap"] = 124
-            append_task_log(task_log_path, f"Nó INPUT_VIDEO [{nid_vid}] configurado com '{vid_comfy_ref}' (cap: 124)")
+            node_vid["inputs"]["frame_load_cap"] = target_frames
+            node_vid["inputs"]["skip_first_frames"] = 0
+            append_task_log(task_log_path, f"Nó INPUT_VIDEO [{nid_vid}] configurado com '{vid_comfy_ref}' (cap: {target_frames})")
         else:
             raise ValueError("Nó INPUT_VIDEO (VHS_LoadVideo) não encontrado no workflow API!")
 
-        # SEED (RandomNoise)
+        # SEED (RandomNoise ou ViggleChunkedSampler)
         nid_seed, node_seed = find_node_by_title(workflow, "SEED")
         if not node_seed:
             for nid, n in workflow.items():
-                if n.get("class_type") in ("RandomNoise", "KSampler", "KSamplerSelect"):
+                if n.get("class_type") in ("RandomNoise", "KSampler", "KSamplerSelect", "ViggleChunkedSampler"):
                     nid_seed, node_seed = nid, n
                     break
         new_seed = int(time.time() * 1000) % (2 ** 32 - 1)
@@ -766,6 +1157,19 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
             elif "seed" in node_seed.get("inputs", {}):
                 node_seed["inputs"]["seed"] = new_seed
             append_task_log(task_log_path, f"Nó SEED [{nid_seed}] configurado com semente {new_seed}")
+
+        # Configurações específicas de modo (chunk_frames no longo, length no curto)
+        if is_long_mode:
+            for nid, n in workflow.items():
+                if isinstance(n, dict) and n.get("class_type") == "ViggleAnimateConditioningWindowed":
+                    n.setdefault("inputs", {})["chunk_frames"] = 124
+                    append_task_log(task_log_path, f"Nó ViggleAnimateConditioningWindowed [{nid}] configurado com chunk_frames=124")
+        else:
+            for nid, n in workflow.items():
+                if isinstance(n, dict) and n.get("class_type") == "ViggleAnimateConditioning":
+                    if "length" in n.get("inputs", {}):
+                        n["inputs"]["length"] = min(target_frames, 124)
+                        append_task_log(task_log_path, f"Nó ViggleAnimateConditioning [{nid}] configurado com length={min(target_frames, 124)}")
 
         # JWImageResizeToMegapixels (Qualidade / Megapixels)
         resize_node_id = None
@@ -822,8 +1226,8 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
                 full_msg = f"Erro HTTP {he.code} ao enfileirar no ComfyUI: {he.reason}"
 
             if is_oom_error(full_msg):
-                append_task_log(task_log_path, f"❌ Erro ao enviar prompt: {OOM_ERROR_MESSAGE}")
-                raise RuntimeError(OOM_ERROR_MESSAGE)
+                append_task_log(task_log_path, f"❌ Erro ao enviar prompt: {oom_msg}")
+                raise RuntimeError(oom_msg)
 
             append_task_log(task_log_path, f"❌ Erro ao enviar prompt: {full_msg}")
             raise RuntimeError(full_msg)
@@ -832,7 +1236,7 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
         if not prompt_id:
             err_msg = prompt_res.get("error", "ComfyUI não retornou prompt_id")
             if is_oom_error(err_msg):
-                raise RuntimeError(OOM_ERROR_MESSAGE)
+                raise RuntimeError(oom_msg)
             raise RuntimeError(f"Erro ao enfileirar no ComfyUI: {err_msg}")
 
         TASKS[task_id]["prompt_id"] = prompt_id
@@ -864,104 +1268,131 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
         except Exception:
             pass
 
-        while not completed:
-            time.sleep(1.0)
-            now = time.time()
+        tracker = ComfyUIProgressTracker(COMFYUI_URL, client_id, prompt_id)
+        tracker.start()
+        last_logged_chunk = None
 
-            # (a) Teto absoluto
-            if (now - start_time) > MAX_TOTAL_TIMEOUT_S:
-                raise TimeoutError(f"Teto absoluto de segurança de {MAX_TOTAL_TIMEOUT_S}s excedido.")
+        try:
+            while not completed:
+                time.sleep(1.0)
+                now = time.time()
 
-            # (b) Consulta histórico de execução
-            try:
-                hist_req = urllib.request.Request(f"{COMFYUI_URL}/history/{prompt_id}")
-                with urllib.request.urlopen(hist_req, timeout=3.0) as h_resp:
-                    hist_data = json.loads(h_resp.read().decode("utf-8"))
+                # (a) Teto absoluto
+                if (now - start_time) > MAX_TOTAL_TIMEOUT_S:
+                    raise TimeoutError(f"Teto absoluto de segurança de {MAX_TOTAL_TIMEOUT_S}s excedido.")
 
-                if prompt_id in hist_data:
-                    item = hist_data[prompt_id]
-                    status_info = item.get("status", {})
-                    if status_info.get("completed", False):
-                        completed = True
-                        outputs = item.get("outputs", {})
-                        append_task_log(task_log_path, "ComfyUI informou execução concluída no histórico!")
-                        break
+                # Sincronização de atividade e bloco via WebSocket
+                if tracker.last_progress_time > last_progress_time:
+                    last_progress_time = tracker.last_progress_time
 
-                    messages = status_info.get("messages", [])
-                    for msg in messages:
-                        if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
-                            tail_err = extract_tail_exception_message(msg[1], max_chars=800)
-                            if is_oom_error(tail_err) or is_oom_error(str(msg[1])):
-                                append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {OOM_ERROR_MESSAGE}")
-                                raise RuntimeError(OOM_ERROR_MESSAGE)
-                            append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
-                            raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
+                if tracker.current_chunk is not None:
+                    curr_c = tracker.current_chunk
+                    tot_c = tracker.total_chunks or "?"
+                    TASKS[task_id]["stage"] = "sampling"
+                    TASKS[task_id]["message"] = f"Renderizando bloco {curr_c} de {tot_c}..."
+                    TASKS[task_id]["step_current"] = curr_c
+                    TASKS[task_id]["step_total"] = tracker.total_chunks
+                    if curr_c != last_logged_chunk:
+                        last_logged_chunk = curr_c
+                        last_progress_time = now
+                        append_task_log(task_log_path, f"Progresso: renderizando bloco {curr_c} de {tot_c}...")
 
-                    if status_info.get("status_str") == "error":
+                # (b) Consulta histórico de execução
+                try:
+                    hist_req = urllib.request.Request(f"{COMFYUI_URL}/history/{prompt_id}")
+                    with urllib.request.urlopen(hist_req, timeout=3.0) as h_resp:
+                        hist_data = json.loads(h_resp.read().decode("utf-8"))
+
+                    if prompt_id in hist_data:
+                        item = hist_data[prompt_id]
+                        status_info = item.get("status", {})
+                        if status_info.get("completed", False):
+                            completed = True
+                            outputs = item.get("outputs", {})
+                            append_task_log(task_log_path, "ComfyUI informou execução concluída no histórico!")
+                            break
+
+                        messages = status_info.get("messages", [])
                         for msg in messages:
                             if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
                                 tail_err = extract_tail_exception_message(msg[1], max_chars=800)
                                 if is_oom_error(tail_err) or is_oom_error(str(msg[1])):
-                                    append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {OOM_ERROR_MESSAGE}")
-                                    raise RuntimeError(OOM_ERROR_MESSAGE)
+                                    append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {oom_msg}")
+                                    raise RuntimeError(oom_msg)
                                 append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
                                 raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
-                        raise RuntimeError(f"ComfyUI reportou erro na execução do prompt {prompt_id}")
-            except urllib.error.URLError:
-                pass
 
-            # (c) Consulta periódica a /system_stats para monitorar menor VRAM livre
-            if (now - last_vram_poll_time) >= 2.0:
-                last_vram_poll_time = now
+                        if status_info.get("status_str") == "error":
+                            for msg in messages:
+                                if isinstance(msg, list) and len(msg) >= 2 and msg[0] == "execution_error":
+                                    tail_err = extract_tail_exception_message(msg[1], max_chars=800)
+                                    if is_oom_error(tail_err) or is_oom_error(str(msg[1])):
+                                        append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {oom_msg}")
+                                        raise RuntimeError(oom_msg)
+                                    append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
+                                    raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
+                            raise RuntimeError(f"ComfyUI reportou erro na execução do prompt {prompt_id}")
+                except urllib.error.URLError:
+                    pass
+
+                # (c) Consulta periódica a /system_stats para monitorar menor VRAM livre
+                if (now - last_vram_poll_time) >= 2.0:
+                    last_vram_poll_time = now
+                    try:
+                        sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
+                        with urllib.request.urlopen(sreq, timeout=2.0) as s_resp:
+                            s_data = json.loads(s_resp.read().decode("utf-8"))
+                            for dev in s_data.get("devices", []):
+                                vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
+                                if vf is not None:
+                                    free_gb = round(float(vf) / (1024 ** 3), 2)
+                                    if min_vram_free_gb is None or free_gb < min_vram_free_gb:
+                                        min_vram_free_gb = free_gb
+                    except Exception:
+                        pass
+
+                # (d) Consulta fila atual para telemetria de nó e progresso
                 try:
-                    sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
-                    with urllib.request.urlopen(sreq, timeout=2.0) as s_resp:
-                        s_data = json.loads(s_resp.read().decode("utf-8"))
-                        for dev in s_data.get("devices", []):
-                            vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
-                            if vf is not None:
-                                free_gb = round(float(vf) / (1024 ** 3), 2)
-                                if min_vram_free_gb is None or free_gb < min_vram_free_gb:
-                                    min_vram_free_gb = free_gb
+                    queue_req = urllib.request.Request(f"{COMFYUI_URL}/queue")
+                    with urllib.request.urlopen(queue_req, timeout=2.0) as q_resp:
+                        q_data = json.loads(q_resp.read().decode("utf-8"))
+                        running = q_data.get("queue_running", [])
+                        if any(r and len(r) > 1 and r[1] == prompt_id for r in running):
+                            last_progress_time = now
+
+                    # Telemetria estimada dos estágios quando não há evento de bloco do WebSocket
+                    if tracker.current_chunk is None:
+                        elapsed = now - start_time
+                        if elapsed < 5:
+                            TASKS[task_id]["stage"] = "queued"
+                            TASKS[task_id]["message"] = "Carregando pesos e condicionamento 3DMM/H3..."
+                            TASKS[task_id]["progress_pct"] = 15.0
+                        elif elapsed < 15:
+                            TASKS[task_id]["stage"] = "sampling"
+                            TASKS[task_id]["message"] = "Amostrando difusão neural Viggle (DMD 4-step)..."
+                            TASKS[task_id]["progress_pct"] = min(75.0, 15.0 + (elapsed - 5) * 4.0)
+                        else:
+                            TASKS[task_id]["stage"] = "decoding"
+                            TASKS[task_id]["message"] = "Decodificando latentes com VAE de vídeo..."
+                            TASKS[task_id]["progress_pct"] = min(92.0, 75.0 + (elapsed - 15) * 1.5)
+                    else:
+                        tot_denom = tracker.total_chunks or max(1, tracker.current_chunk)
+                        TASKS[task_id]["progress_pct"] = min(94.0, round((tracker.current_chunk / tot_denom) * 80.0 + 15.0, 1))
+
                 except Exception:
                     pass
 
-            # (c) Consulta fila atual para telemetria de nó e progresso
-            try:
-                queue_req = urllib.request.Request(f"{COMFYUI_URL}/queue")
-                with urllib.request.urlopen(queue_req, timeout=2.0) as q_resp:
-                    q_data = json.loads(q_resp.read().decode("utf-8"))
-                    running = q_data.get("queue_running", [])
-                    if any(r and len(r) > 1 and r[1] == prompt_id for r in running):
-                        last_progress_time = now
-
-                # Telemetria estimada dos estágios
-                elapsed = now - start_time
-                if elapsed < 5:
-                    TASKS[task_id]["stage"] = "queued"
-                    TASKS[task_id]["message"] = "Carregando pesos e condicionamento 3DMM/H3..."
-                    TASKS[task_id]["progress_pct"] = 15.0
-                elif elapsed < 15:
-                    TASKS[task_id]["stage"] = "sampling"
-                    TASKS[task_id]["message"] = "Amostrando difusão neural Viggle (DMD 4-step)..."
-                    TASKS[task_id]["progress_pct"] = min(75.0, 15.0 + (elapsed - 5) * 4.0)
-                else:
-                    TASKS[task_id]["stage"] = "decoding"
-                    TASKS[task_id]["message"] = "Decodificando latentes com VAE de vídeo..."
-                    TASKS[task_id]["progress_pct"] = min(92.0, 75.0 + (elapsed - 15) * 1.5)
-
-            except Exception:
-                pass
-
-            # (d) Timeout por ausência de progresso
-            if (now - last_progress_time) > NO_PROGRESS_TIMEOUT_S:
-                # Tenta interromper ComfyUI
-                try:
-                    int_req = urllib.request.Request(f"{COMFYUI_URL}/interrupt", data=b"", headers={"Content-Type": "application/json"})
-                    urllib.request.urlopen(int_req, timeout=2.0)
-                except Exception:
-                    pass
-                raise TimeoutError(f"Ausência de progresso no ComfyUI por mais de {NO_PROGRESS_TIMEOUT_S} segundos.")
+                # (e) Timeout por ausência de progresso
+                if (now - last_progress_time) > NO_PROGRESS_TIMEOUT_S:
+                    # Tenta interromper ComfyUI
+                    try:
+                        int_req = urllib.request.Request(f"{COMFYUI_URL}/interrupt", data=b"", headers={"Content-Type": "application/json"})
+                        urllib.request.urlopen(int_req, timeout=2.0)
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"Ausência de progresso no ComfyUI por mais de {NO_PROGRESS_TIMEOUT_S} segundos.")
+        finally:
+            tracker.stop()
 
         # 8. Extrair arquivo de vídeo gerado
         TASKS[task_id]["stage"] = "saving"
@@ -1088,7 +1519,7 @@ def background_viggle_worker(task_id, work_dir, image_path, motion_video_path, a
     except Exception as e:
         err_raw = str(e)
         if is_oom_error(err_raw):
-            user_msg = OOM_ERROR_MESSAGE
+            user_msg = oom_msg
         else:
             user_msg = f"Falha na renderização Viggle: {err_raw}"
         TASKS[task_id]["status"] = "error"
@@ -1160,6 +1591,8 @@ def generate_neural_video():
         aspect_ratio = request.form.get('aspect_ratio', 'original').lower()
         quality_raw = request.form.get('quality')
         quality_key, target_megapixels = parse_quality(quality_raw)
+        min_duration = request.form.get('min_duration', 5.0)
+        max_duration = request.form.get('max_duration', 30.0)
 
         TASKS[task_id] = {
             "task_id": task_id,
@@ -1177,12 +1610,14 @@ def generate_neural_video():
             "aviso_audio": bool(audio_path),
             "quality": quality_key,
             "megapixels": target_megapixels,
+            "min_duration": min_duration,
+            "max_duration": max_duration,
             "log_path": os.path.join(work_dir, "task_render.log")
         }
 
         t = threading.Thread(
             target=background_viggle_worker,
-            args=(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality_raw),
+            args=(task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio, quality_raw, min_duration, max_duration),
             daemon=True
         )
         t.start()
