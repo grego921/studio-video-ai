@@ -710,8 +710,10 @@ def check_environment_health():
     wf_valid, wf_problems = validate_workflow_against_comfyui(WORKFLOW_API_PATH, COMFYUI_URL)
 
     longo_exists = os.path.exists(WORKFLOW_LONGO_API_PATH)
-    longo_valid = True
-    if longo_exists:
+    longo_valid = False
+    if not longo_exists:
+        wf_problems.append(f"[Longo] arquivo não encontrado: {WORKFLOW_LONGO_API_PATH}")
+    else:
         longo_valid, longo_probs = validate_workflow_against_comfyui(WORKFLOW_LONGO_API_PATH, COMFYUI_URL)
         if not longo_valid:
             wf_problems.extend([f"[Longo] {p}" for p in longo_probs])
@@ -725,6 +727,7 @@ def check_environment_health():
         ckpt_text_cond_ok and
         ckpt_vae_ok and
         workflow_exists and
+        longo_exists and
         wf_valid and
         longo_valid
     )
@@ -739,8 +742,8 @@ def check_environment_health():
         "checkpoint_lora": ckpt_lora_ok,
         "checkpoint_text_cond": ckpt_text_cond_ok,
         "checkpoint_vae": ckpt_vae_ok,
-        "workflow_exists": workflow_exists,
-        "workflow_valid": wf_valid,
+        "workflow_exists": bool(workflow_exists and longo_exists),
+        "workflow_valid": bool(wf_valid and longo_valid),
         "workflow_problems": wf_problems,
         "gpu": gpu_name,
         "engine": "Viggle-Animate H3 (ComfyUI A100 Engine v1.0)",

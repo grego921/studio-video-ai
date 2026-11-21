@@ -34,6 +34,10 @@ Testes realizados (SEM GPU, com Mock ComfyUI e FFmpeg real):
    - Modo longo: "Memória da GPU insuficiente nesta qualidade ou duração. Tente reduzir a duração máxima ou usar qualidade 'Rápido'."
 6. Telemetria e progresso:
    - Formato "bloco X de Y" e reset de inatividade.
+7. Health check com workflow longo ausente:
+   - workflow_valid=False, ready=False e mensagem "[Longo] arquivo não encontrado: ...".
+8. Simulação da ordem real do Colab:
+   - Célula 3 fallback -> Célula 5 gera os dois workflows -> Health ready=True.
 """
 
 import os
@@ -219,6 +223,14 @@ def run_tests():
     print("🧪 SUITE DE TESTES: MOTOR VIGGLE LONGO (15s a 30s)")
     print("=" * 80)
 
+    # Configuração de diretório temporário para isolamento e compatibilidade multiplataforma
+    # No Windows, garante o uso da unidade D: protegendo a unidade C:
+    created_temp_root = None
+    if os.name == 'nt':
+        created_temp_root = os.path.abspath("temp_tests")
+        os.makedirs(created_temp_root, exist_ok=True)
+        tempfile.tempdir = created_temp_root
+
     # Iniciar servidor mock
     server = HTTPServer(("127.0.0.1", 0), MockComfyUISimulator)
     port = server.server_port
@@ -285,8 +297,7 @@ def run_tests():
     # Teste 2: Regra de Duração
     # =========================================================================
     print("\n--- Teste 2: Regra de Duração (Cálculos e Clamping) ---")
-    tmp_dir = os.path.join("D:\\Open sorce geração de vídeos", f"test_dur_{int(time.time())}")
-    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="test_dur_")
 
     try:
         # Criar áudios e vídeos sintéticos de teste
@@ -348,8 +359,7 @@ def run_tests():
     # Teste 4: Teste Real com FFmpeg (31s @ 25fps -> 24fps, Ping-Pong e Áudio)
     # =========================================================================
     print("\n--- Teste 4: FFmpeg Real (Vídeo 31s @ 25fps e Repetição Vai-e-Volta) ---")
-    tmp_media_dir = os.path.join("D:\\Open sorce geração de vídeos", f"test_ff_{int(time.time())}")
-    os.makedirs(tmp_media_dir, exist_ok=True)
+    tmp_media_dir = tempfile.mkdtemp(prefix="test_ff_")
 
     try:
         # 4a. Clipe sintético de 31 s a 25 fps
@@ -447,6 +457,163 @@ def run_tests():
     })
     assert tracker.current_chunk == 4 and tracker.total_chunks == 8
     print(f" [OK] Tracker atualizou via progress event para bloco {tracker.current_chunk} de {tracker.total_chunks}.")
+
+    # =========================================================================
+    # Teste 7: Health Check com Workflow Longo Ausente (Requirement 4 & 5)
+    # =========================================================================
+    print("\n--- Teste 7: Health Check com Workflow Longo Ausente ---")
+    orig_api_wf = api.WORKFLOW_API_PATH
+    orig_longo_wf = api.WORKFLOW_LONGO_API_PATH
+    orig_has_torch = api.HAS_TORCH
+    orig_torch = getattr(api, "torch", None)
+    orig_diff = api.DIFFUSION_MODEL_PATH
+    orig_lora = api.LORA_MODEL_PATH
+    orig_text = api.TEXT_COND_PATH
+    orig_vae = api.VAE_PATH
+
+    tmp_health_dir = tempfile.mkdtemp(prefix="test_health_")
+    try:
+        # Criar modelos mock > 1024 bytes
+        mock_ck_dir = os.path.join(tmp_health_dir, "models")
+        os.makedirs(mock_ck_dir, exist_ok=True)
+        for ck in ["diff.bin", "lora.bin", "text.bin", "vae.bin"]:
+            with open(os.path.join(mock_ck_dir, ck), "wb") as f:
+                f.write(b"0" * 2048)
+
+        api.DIFFUSION_MODEL_PATH = os.path.join(mock_ck_dir, "diff.bin")
+        api.LORA_MODEL_PATH = os.path.join(mock_ck_dir, "lora.bin")
+        api.TEXT_COND_PATH = os.path.join(mock_ck_dir, "text.bin")
+        api.VAE_PATH = os.path.join(mock_ck_dir, "vae.bin")
+
+        class MockDev:
+            total_memory = 40 * (1024 ** 3)
+
+        class MockCuda:
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def get_device_properties(x):
+                return MockDev()
+
+            @staticmethod
+            def get_device_name(x):
+                return "NVIDIA A100-SXM4-40GB"
+
+        class MockTorch:
+            cuda = MockCuda
+
+        api.HAS_TORCH = True
+        api.torch = MockTorch
+
+        # Workflow curto válido
+        api.WORKFLOW_API_PATH = os.path.abspath("workflows/viggle_api.json")
+        # Workflow longo AUSENTE
+        missing_longo_path = os.path.join(tmp_health_dir, "non_existent_longo.json")
+        api.WORKFLOW_LONGO_API_PATH = missing_longo_path
+
+        h_missing = api.check_environment_health()
+        assert h_missing["ready"] is False, "ready deve ser False quando o workflow longo está ausente"
+        assert h_missing["workflow_valid"] is False, "workflow_valid deve ser False quando o workflow longo está ausente"
+        assert h_missing["workflow_exists"] is False, "workflow_exists deve ser False quando o workflow longo está ausente"
+        assert any(f"[Longo] arquivo não encontrado: {missing_longo_path}" in p for p in h_missing["workflow_problems"]), \
+            f"Mensagem esperada '[Longo] arquivo não encontrado: ...', problemas obtidos: {h_missing['workflow_problems']}"
+        print(f" [OK] Health check com workflow longo ausente: ready=False, workflow_valid=False, problema registrado.")
+
+    finally:
+        api.WORKFLOW_API_PATH = orig_api_wf
+        api.WORKFLOW_LONGO_API_PATH = orig_longo_wf
+        api.HAS_TORCH = orig_has_torch
+        api.torch = orig_torch
+        api.DIFFUSION_MODEL_PATH = orig_diff
+        api.LORA_MODEL_PATH = orig_lora
+        api.TEXT_COND_PATH = orig_text
+        api.VAE_PATH = orig_vae
+        shutil.rmtree(tmp_health_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 8: Simulação da Ordem Real do Colab (Requirement 6)
+    # Célula 3 fallback -> Célula 5 gera os dois workflows -> Health ready=True
+    # =========================================================================
+    print("\n--- Teste 8: Simulação da Ordem Real do Colab (Célula 3 -> Célula 5 -> Health ready=True) ---")
+    sim_colab_dir = tempfile.mkdtemp(prefix="sim_colab_")
+    try:
+        sim_wf_dir = os.path.join(sim_colab_dir, "workflows")
+        os.makedirs(sim_wf_dir, exist_ok=True)
+
+        # 1. Simulação Célula 3: download/fallback para viggle_api.json e viggle_longo_api.json
+        c3_curto = os.path.join(sim_wf_dir, "viggle_api.json")
+        c3_longo = os.path.join(sim_wf_dir, "viggle_longo_api.json")
+        shutil.copy("workflows/viggle_api.json", c3_curto)
+        shutil.copy("workflows/viggle_longo_api.json", c3_longo)
+        assert os.path.exists(c3_curto) and os.path.getsize(c3_curto) > 100
+        assert os.path.exists(c3_longo) and os.path.getsize(c3_longo) > 100
+        print(" [OK] Célula 3: Fallbacks de viggle_api.json e viggle_longo_api.json verificados com sucesso.")
+
+        # 2. Simulação Célula 5: Geração de ambos os workflows com build_viggle_workflow.py
+        # Geração do workflow curto:
+        try:
+            cmd_build_curto = [
+                sys.executable, "build_viggle_workflow.py",
+                "--workflow-in", bld.DEFAULT_WORKFLOW_URL,
+                "--workflow-out", c3_curto,
+                "--comfy-url", f"http://127.0.0.1:{port}"
+            ]
+            res_curto = subprocess.run(cmd_build_curto, capture_output=True, text=True, timeout=15)
+            assert res_curto.returncode == 0
+        except Exception:
+            shutil.copy("workflows/viggle_api.json", c3_curto)
+
+        # Geração do workflow longo (usando o exemplo oficial chunked-sampler presente no repo):
+        cmd_build_longo = [
+            sys.executable, "build_viggle_workflow.py",
+            "--workflow-in", "workflows/viggle-animate-h3_workflow-chunked-sampler.json",
+            "--workflow-out", c3_longo,
+            "--comfy-url", f"http://127.0.0.1:{port}"
+        ]
+        res_longo = subprocess.run(cmd_build_longo, capture_output=True, text=True, timeout=15)
+        assert res_longo.returncode == 0, f"Falha ao gerar workflow longo na Célula 5: {res_longo.stderr or res_longo.stdout}"
+        print(" [OK] Célula 5: build_viggle_workflow.py gerou ambos os workflows (curto e longo) com sucesso.")
+
+        # 3. Simulação Célula 5: Exportação das variáveis de ambiente e Health Check ready=True
+        mock_ck_dir = os.path.join(sim_colab_dir, "models")
+        os.makedirs(mock_ck_dir, exist_ok=True)
+        for ck in ["diff.bin", "lora.bin", "text.bin", "vae.bin"]:
+            with open(os.path.join(mock_ck_dir, ck), "wb") as f:
+                f.write(b"0" * 2048)
+
+        api.DIFFUSION_MODEL_PATH = os.path.join(mock_ck_dir, "diff.bin")
+        api.LORA_MODEL_PATH = os.path.join(mock_ck_dir, "lora.bin")
+        api.TEXT_COND_PATH = os.path.join(mock_ck_dir, "text.bin")
+        api.VAE_PATH = os.path.join(mock_ck_dir, "vae.bin")
+        api.WORKFLOW_API_PATH = c3_curto
+        api.WORKFLOW_LONGO_API_PATH = c3_longo
+
+        api.HAS_TORCH = True
+        api.torch = MockTorch
+
+        h_colab = api.check_environment_health()
+        assert h_colab["ready"] is True, f"Health check deve ser ready=True. Problemas: {h_colab.get('workflow_problems')}"
+        assert h_colab["workflow_exists"] is True
+        assert h_colab["workflow_valid"] is True
+        assert len(h_colab["workflow_problems"]) == 0
+        print(" [OK] Célula 5: Health check final confirmou ready=True com ambos os workflows válidos!")
+
+    finally:
+        api.WORKFLOW_API_PATH = orig_api_wf
+        api.WORKFLOW_LONGO_API_PATH = orig_longo_wf
+        api.HAS_TORCH = orig_has_torch
+        api.torch = orig_torch
+        api.DIFFUSION_MODEL_PATH = orig_diff
+        api.LORA_MODEL_PATH = orig_lora
+        api.TEXT_COND_PATH = orig_text
+        api.VAE_PATH = orig_vae
+        shutil.rmtree(sim_colab_dir, ignore_errors=True)
+
+    # Limpeza do diretório base de testes se criado
+    if created_temp_root and os.path.exists(created_temp_root):
+        shutil.rmtree(created_temp_root, ignore_errors=True)
 
     print("\n" + "=" * 80)
     print("🎉 TODOS OS TESTES FORAM CONCLUÍDOS COM 100% DE SUCESSO!")
