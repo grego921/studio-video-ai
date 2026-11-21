@@ -17,6 +17,7 @@ import threading
 import subprocess
 import urllib.request
 import urllib.error
+import http.client
 from flask import Flask, request, jsonify, send_file
 from PIL import Image
 
@@ -80,6 +81,7 @@ def verify_and_ensure_symlink(comfy_path: str, drive_rel_path: str) -> bool:
 
 NO_PROGRESS_TIMEOUT_S = int(os.environ.get("NO_PROGRESS_TIMEOUT_S", 600))  # 10 min sem modificação no log
 MAX_TOTAL_TIMEOUT_S = int(os.environ.get("MAX_TOTAL_TIMEOUT_S", 3 * 3600))  # 3 horas de teto absoluto
+HISTORY_POLL_TIMEOUT_S = float(os.environ.get("HISTORY_POLL_TIMEOUT_S", 10.0))  # 10s de timeout na consulta a /history
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -416,10 +418,11 @@ class ComfyUIProgressTracker:
     Extrai informações de progresso de blocos ("bloco X de Y") e reseta o timestamp
     de atividade na virada de cada bloco.
     """
-    def __init__(self, comfy_url: str, client_id: str, prompt_id: str):
+    def __init__(self, comfy_url: str, client_id: str, prompt_id: str, sampler_node_id: str = None):
         self.comfy_url = comfy_url.rstrip("/")
         self.client_id = client_id
         self.prompt_id = prompt_id
+        self.sampler_node_id = str(sampler_node_id) if sampler_node_id is not None else None
         self.current_chunk = None
         self.total_chunks = None
         self.chunk_text = ""
@@ -533,21 +536,42 @@ class ComfyUIProgressTracker:
             return
 
         now = time.time()
+        # Eventos do ComfyUI contam como atividade para o timeout de 600 s
+        self.last_progress_time = now
+
         if mtype == "viggle.chunk_progress":
-            self.last_progress_time = now
             text = str(data.get("text", ""))
             self.chunk_text = text
             m = re.search(r'Chunk\s+(\d+)\s+of\s+(\d+)', text, re.IGNORECASE)
             if m:
-                self.current_chunk = int(m.group(1))
-                self.total_chunks = int(m.group(2))
+                c = int(m.group(1))
+                tot = int(m.group(2))
+                # Se o total de blocos for implausível (> 100), ignorar
+                if tot <= 100:
+                    self.current_chunk = c
+                    self.total_chunks = tot
         elif mtype == "progress":
-            self.last_progress_time = now
+            node_id = data.get("node")
+            if node_id is None:
+                node_id = data.get("display_node")
+            node_str = str(node_id) if node_id is not None else None
+
+            # Só aceitar eventos cujo nó seja o ViggleChunkedSampler (SEED)
+            if not self.sampler_node_id or node_str != str(self.sampler_node_id):
+                return
+
             v = data.get("value")
             m = data.get("max")
             if v is not None and m is not None:
-                self.current_chunk = int(v)
-                self.total_chunks = int(m)
+                try:
+                    c = int(v)
+                    tot = int(m)
+                    # Se o total de blocos for implausível (> 100), ignorar
+                    if tot <= 100:
+                        self.current_chunk = c
+                        self.total_chunks = tot
+                except (ValueError, TypeError):
+                    pass
         elif mtype in ("executing", "executed", "status"):
             self.last_progress_time = now
 
@@ -1010,6 +1034,38 @@ def find_node_by_title(workflow, title):
                 return nid, node
     return None, None
 
+def interrupt_comfyui():
+    """Envia POST /interrupt ao ComfyUI para cancelar qualquer execução pendente ou em andamento."""
+    try:
+        req = urllib.request.Request(
+            f"{COMFYUI_URL}/interrupt",
+            data=b"",
+            headers={"Content-Type": "application/json", "User-Agent": "StudioVideoAI"}
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            pass
+    except Exception:
+        pass
+
+def clear_comfyui_queue():
+    """Envia POST /queue com {"clear": true} ao ComfyUI para limpar a fila pendente."""
+    try:
+        body = json.dumps({"clear": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{COMFYUI_URL}/queue",
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "StudioVideoAI"}
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            pass
+    except Exception:
+        pass
+
+def init_comfyui_session():
+    """Limpa fila e interrompe execuções residuais no ComfyUI na inicialização."""
+    interrupt_comfyui()
+    clear_comfyui_queue()
+
 def background_viggle_worker(
     task_id, work_dir, image_path, motion_video_path, audio_path, aspect_ratio,
     quality="padrao", min_duration=5.0, max_duration=30.0
@@ -1257,7 +1313,7 @@ def background_viggle_worker(
         # Checagem inicial de VRAM via /system_stats
         try:
             init_sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
-            with urllib.request.urlopen(init_sreq, timeout=2.0) as is_resp:
+            with urllib.request.urlopen(init_sreq, timeout=5.0) as is_resp:
                 is_data = json.loads(is_resp.read().decode("utf-8"))
                 for dev in is_data.get("devices", []):
                     vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
@@ -1265,10 +1321,18 @@ def background_viggle_worker(
                         free_gb = round(float(vf) / (1024 ** 3), 2)
                         if min_vram_free_gb is None or free_gb < min_vram_free_gb:
                             min_vram_free_gb = free_gb
-        except Exception:
+        except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
             pass
 
-        tracker = ComfyUIProgressTracker(COMFYUI_URL, client_id, prompt_id)
+        # Identificar ID do nó sampler pelo título SEED no workflow carregado
+        sampler_nid, _ = find_node_by_title(workflow, "SEED")
+        if not sampler_nid:
+            for nid, n in workflow.items():
+                if isinstance(n, dict) and n.get("class_type") == "ViggleChunkedSampler":
+                    sampler_nid = nid
+                    break
+
+        tracker = ComfyUIProgressTracker(COMFYUI_URL, client_id, prompt_id, sampler_node_id=sampler_nid)
         tracker.start()
         last_logged_chunk = None
 
@@ -1279,7 +1343,14 @@ def background_viggle_worker(
 
                 # (a) Teto absoluto
                 if (now - start_time) > MAX_TOTAL_TIMEOUT_S:
+                    interrupt_comfyui()
                     raise TimeoutError(f"Teto absoluto de segurança de {MAX_TOTAL_TIMEOUT_S}s excedido.")
+
+                # Verificação de cancelamento da tarefa
+                if TASKS.get(task_id, {}).get("status") == "cancelled" or TASKS.get(task_id, {}).get("cancelled"):
+                    interrupt_comfyui()
+                    append_task_log(task_log_path, "Tarefa cancelada. Interrompendo execução no ComfyUI.")
+                    raise RuntimeError("Tarefa cancelada.")
 
                 # Sincronização de atividade e bloco via WebSocket
                 if tracker.last_progress_time > last_progress_time:
@@ -1300,7 +1371,7 @@ def background_viggle_worker(
                 # (b) Consulta histórico de execução
                 try:
                     hist_req = urllib.request.Request(f"{COMFYUI_URL}/history/{prompt_id}")
-                    with urllib.request.urlopen(hist_req, timeout=3.0) as h_resp:
+                    with urllib.request.urlopen(hist_req, timeout=HISTORY_POLL_TIMEOUT_S) as h_resp:
                         hist_data = json.loads(h_resp.read().decode("utf-8"))
 
                     if prompt_id in hist_data:
@@ -1332,7 +1403,7 @@ def background_viggle_worker(
                                     append_task_log(task_log_path, f"❌ Erro na execução dos nós ComfyUI: {tail_err}")
                                     raise RuntimeError(f"Erro na execução dos nós ComfyUI: {tail_err}")
                             raise RuntimeError(f"ComfyUI reportou erro na execução do prompt {prompt_id}")
-                except urllib.error.URLError:
+                except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
                     pass
 
                 # (c) Consulta periódica a /system_stats para monitorar menor VRAM livre
@@ -1340,7 +1411,7 @@ def background_viggle_worker(
                     last_vram_poll_time = now
                     try:
                         sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
-                        with urllib.request.urlopen(sreq, timeout=2.0) as s_resp:
+                        with urllib.request.urlopen(sreq, timeout=5.0) as s_resp:
                             s_data = json.loads(s_resp.read().decode("utf-8"))
                             for dev in s_data.get("devices", []):
                                 vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
@@ -1348,13 +1419,13 @@ def background_viggle_worker(
                                     free_gb = round(float(vf) / (1024 ** 3), 2)
                                     if min_vram_free_gb is None or free_gb < min_vram_free_gb:
                                         min_vram_free_gb = free_gb
-                    except Exception:
+                    except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
                         pass
 
                 # (d) Consulta fila atual para telemetria de nó e progresso
                 try:
                     queue_req = urllib.request.Request(f"{COMFYUI_URL}/queue")
-                    with urllib.request.urlopen(queue_req, timeout=2.0) as q_resp:
+                    with urllib.request.urlopen(queue_req, timeout=5.0) as q_resp:
                         q_data = json.loads(q_resp.read().decode("utf-8"))
                         running = q_data.get("queue_running", [])
                         if any(r and len(r) > 1 and r[1] == prompt_id for r in running):
@@ -1379,17 +1450,12 @@ def background_viggle_worker(
                         tot_denom = tracker.total_chunks or max(1, tracker.current_chunk)
                         TASKS[task_id]["progress_pct"] = min(94.0, round((tracker.current_chunk / tot_denom) * 80.0 + 15.0, 1))
 
-                except Exception:
+                except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
                     pass
 
                 # (e) Timeout por ausência de progresso
                 if (now - last_progress_time) > NO_PROGRESS_TIMEOUT_S:
-                    # Tenta interromper ComfyUI
-                    try:
-                        int_req = urllib.request.Request(f"{COMFYUI_URL}/interrupt", data=b"", headers={"Content-Type": "application/json"})
-                        urllib.request.urlopen(int_req, timeout=2.0)
-                    except Exception:
-                        pass
+                    interrupt_comfyui()
                     raise TimeoutError(f"Ausência de progresso no ComfyUI por mais de {NO_PROGRESS_TIMEOUT_S} segundos.")
         finally:
             tracker.stop()
@@ -1517,6 +1583,7 @@ def background_viggle_worker(
         append_task_log(task_log_path, f"🎉 Concluído com sucesso! Vídeo: {out_filename} ({size_mb} MB)")
 
     except Exception as e:
+        interrupt_comfyui()
         err_raw = str(e)
         if is_oom_error(err_raw):
             user_msg = oom_msg
@@ -1704,7 +1771,23 @@ def download_video(task_id, filename):
         return send_file(video_path, mimetype='video/mp4', as_attachment=as_attachment, download_name=filename)
     return jsonify({"error": "Vídeo não encontrado"}), 404
 
+@app.route('/api/cancel_task/<task_id>', methods=['POST', 'OPTIONS'])
+@app.route('/api/cancel/<task_id>', methods=['POST', 'OPTIONS'])
+def cancel_task(task_id):
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+    if task_id in TASKS:
+        TASKS[task_id]["cancelled"] = True
+        TASKS[task_id]["status"] = "cancelled"
+        TASKS[task_id]["proc_alive"] = False
+        TASKS[task_id]["message"] = "Tarefa cancelada."
+        interrupt_comfyui()
+        return jsonify({"success": True, "task_id": task_id, "message": "Tarefa cancelada e ComfyUI interrompido."}), 200
+    return jsonify({"success": False, "error": "Tarefa não encontrada."}), 404
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 7860))
+    print(f"🧹 Limpando fila e interrompendo execuções residuais no ComfyUI ({COMFYUI_URL})...")
+    init_comfyui_session()
     print(f"🚀 Iniciando Studio Video AI Viggle GPU Bridge v8.0 na porta {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
