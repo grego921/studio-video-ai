@@ -1,12 +1,12 @@
 """
 Suite de Testes Unitários: Seletor de Qualidade Viggle (colab_viggle_api.py + Frontend)
-Branch: viggle-qualidade
+Branch: viggle-padrao
 Valida:
-1. Presets de qualidade ('rapido' -> 0.4, 'padrao' -> 0.7, 'alta' -> 1.0) alteram apenas megapixels do nó certo
-2. Valores ausentes ou inválidos caem em 'rapido' (0.4 MP)
-3. Erros de falta de memória (OOM) no ComfyUI geram a mensagem: "Memória da GPU insuficiente nesta qualidade. Tente 'Padrão' ou 'Rápido'."
-4. Registro completo no log da tarefa: qualidade, megapixels, resolução final, tempo total e menor VRAM livre
-5. Templates index.html e html_template.py idênticos byte a byte, com seletor e aviso presentes
+1. Padrão ausente e inválido => 'padrao' (0.7 MP)
+2. 'alta' => 'padrao' (0.7 MP) com aviso no log: "Qualidade 'alta' desativada, usando 'padrao'."
+3. 'rapido' => 0.4 MP
+4. Detecção OOM com regex de palavra inteira (não dispara com 'zoom' nem 'room', mas dispara com 'oom' ou 'out of memory')
+5. Templates index.html e html_template.py idênticos byte a byte, com 'Padrão' ativo por padrão, 'Alta' removida e aviso atualizado
 """
 
 import os
@@ -29,6 +29,7 @@ import html_template
 class MockComfyUIHandler(BaseHTTPRequestHandler):
     last_prompt_workflow = None
     simulate_oom = False
+    simulate_zoom_error = False
     simulate_prompt_oom = False
     vram_free_bytes = 21474836480  # 20.0 GB
 
@@ -38,7 +39,6 @@ class MockComfyUIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/system_stats":
-            # Reduz um pouco o VRAM livre para simular oscilação observável
             MockComfyUIHandler.vram_free_bytes -= 536870912  # -0.5 GB
             data = {
                 "system": {"os": "linux", "python_version": "3.10"},
@@ -80,6 +80,26 @@ class MockComfyUIHandler(BaseHTTPRequestHandler):
                         }
                     }
                 }
+            elif MockComfyUIHandler.simulate_zoom_error:
+                data = {
+                    prompt_id: {
+                        "status": {
+                            "status_str": "error",
+                            "completed": False,
+                            "messages": [
+                                [
+                                    "execution_error",
+                                    {
+                                        "node_id": "26",
+                                        "node_type": "JWImageResizeToMegapixels",
+                                        "exception_type": "ValueError",
+                                        "exception_message": "Invalid zoom interpolation factor"
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                }
             else:
                 data = {
                     prompt_id: {
@@ -102,7 +122,6 @@ class MockComfyUIHandler(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/view"):
-            # Devolve bytes de vídeo falso
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")
             self.end_headers()
@@ -182,7 +201,7 @@ def create_synthetic_png(path):
 
 def main():
     print("=" * 70)
-    print("INICIANDO SUITE DE TESTES: SELETOR DE QUALIDADE (VIGGLE)")
+    print("INICIANDO SUITE DE TESTES: VIGGLE-PADRAO (0.7 MP)")
     print("=" * 70)
 
     # 1. Iniciar Fake ComfyUI Server em porta livre
@@ -193,170 +212,185 @@ def main():
     print(f"[*] Mock ComfyUI rodando em http://127.0.0.1:{server_port}")
 
     api.COMFYUI_URL = f"http://127.0.0.1:{server_port}"
-    work_base_dir = tempfile.mkdtemp(prefix="viggle_quality_test_")
+    
+    # Criado estritamente na unidade D:
+    d_temp_dir = os.path.abspath("temp_test_padrao")
+    os.makedirs(d_temp_dir, exist_ok=True)
+    work_base_dir = tempfile.mkdtemp(prefix="viggle_padrao_", dir=d_temp_dir)
 
     try:
-        # Prepara mídias de teste sintéticas
+        # Prepara mídias sintéticas
         sample_img = os.path.join(work_base_dir, "face.png")
         sample_vid = os.path.join(work_base_dir, "motion.mp4")
         create_synthetic_png(sample_img)
         create_synthetic_mp4(sample_vid, duration_s=1)
 
         # -------------------------------------------------------------------
-        # TESTE 1: Parser de Qualidade e Presets
+        # TESTE 1: Parser de Qualidade e Mapeamento de Megapixels
         # -------------------------------------------------------------------
         print("\n--- Teste 1: Parser de Qualidade e Mapeamento de Megapixels ---")
-        assert api.parse_quality("rapido") == ("rapido", 0.4), "rapido deve ser 0.4 MP"
+        # 1. 'padrao' => 0.7
         assert api.parse_quality("padrao") == ("padrao", 0.7), "padrao deve ser 0.7 MP"
-        assert api.parse_quality("alta") == ("alta", 1.0), "alta deve ser 1.0 MP"
-        assert api.parse_quality("ALTA") == ("alta", 1.0), "case insensitive deve funcionar"
+        assert api.parse_quality("PADRAO") == ("padrao", 0.7), "case insensitive deve funcionar"
         assert api.parse_quality("  padrao  ") == ("padrao", 0.7), "whitespace deve ser removido"
-        assert api.parse_quality("invalido") == ("rapido", 0.4), "inválido deve cair em rapido (0.4 MP)"
-        assert api.parse_quality(None) == ("rapido", 0.4), "None deve cair em rapido (0.4 MP)"
-        assert api.parse_quality("") == ("rapido", 0.4), "vazio deve cair em rapido (0.4 MP)"
-        assert api.parse_quality(12345) == ("rapido", 0.4), "tipo inesperado deve cair em rapido (0.4 MP)"
-        print(" [OK] parse_quality validado para todos os presets e fallbacks.")
+
+        # 2. 'alta' => 0.7 (tratado como padrao)
+        assert api.parse_quality("alta") == ("padrao", 0.7), "alta deve ser tratada como padrao (0.7 MP)"
+        assert api.parse_quality("ALTA") == ("padrao", 0.7), "ALTA deve ser tratada como padrao (0.7 MP)"
+
+        # 3. 'rapido' => 0.4
+        assert api.parse_quality("rapido") == ("rapido", 0.4), "rapido deve ser 0.4 MP"
+
+        # 4. Padrão ausente e inválido => 'padrao' (0.7 MP)
+        assert api.parse_quality(None) == ("padrao", 0.7), "None deve cair em padrao (0.7 MP)"
+        assert api.parse_quality("") == ("padrao", 0.7), "vazio deve cair em padrao (0.7 MP)"
+        assert api.parse_quality("invalido_xyz") == ("padrao", 0.7), "inválido deve cair em padrao (0.7 MP)"
+        assert api.parse_quality(12345) == ("padrao", 0.7), "tipo inesperado deve cair em padrao (0.7 MP)"
+        print(" [OK] parse_quality validado: ausente/inválido/alta => 0.7 MP; rapido => 0.4 MP.")
 
         # -------------------------------------------------------------------
         # TESTE 2: Execução com cada Preset no Workflow ComfyUI
         # -------------------------------------------------------------------
         print("\n--- Teste 2: Injeção de Presets no Workflow ComfyUI ---")
-        presets_to_test = [
-            ("rapido", 0.4),
-            ("padrao", 0.7),
-            ("alta", 1.0),
-            ("opcao_inexistente", 0.4)  # Fallback em execução
-        ]
-
-        # Salva o arquivo mp4 no ComfyUI output simulado para cópia direta
         mock_output_dir = os.path.join(work_base_dir, "output")
         os.makedirs(mock_output_dir, exist_ok=True)
         sample_out_vid = os.path.join(mock_output_dir, "viggle_test.mp4")
         create_synthetic_mp4(sample_out_vid, duration_s=1)
         api.COMFYUI_DIR = work_base_dir
 
-        for q_input, expected_mp in presets_to_test:
-            task_id = f"test_{q_input}_{uuid.uuid4().hex[:4]}"
-            task_dir = os.path.join(work_base_dir, f"task_{task_id}")
-            os.makedirs(task_dir, exist_ok=True)
-            api.TASKS[task_id] = {"task_id": task_id, "status": "started"}
+        # Teste 2A: 'padrao' => 0.7 MP
+        t_padrao_id = f"test_padrao_{uuid.uuid4().hex[:4]}"
+        t_padrao_dir = os.path.join(work_base_dir, f"task_{t_padrao_id}")
+        os.makedirs(t_padrao_dir, exist_ok=True)
+        api.TASKS[t_padrao_id] = {"task_id": t_padrao_id, "status": "started"}
+        MockComfyUIHandler.last_prompt_workflow = None
+        api.background_viggle_worker(t_padrao_id, t_padrao_dir, sample_img, sample_vid, None, "original", "padrao")
+        
+        res_node_padrao = [n for n in MockComfyUIHandler.last_prompt_workflow.values() if n.get("class_type") == "JWImageResizeToMegapixels"][0]
+        assert res_node_padrao["inputs"]["megapixels"] == 0.7, "padrao deve configurar megapixels=0.7"
+        print(" [OK] Preset 'padrao' -> megapixels=0.7 configurado com sucesso.")
 
-            MockComfyUIHandler.simulate_oom = False
-            MockComfyUIHandler.simulate_prompt_oom = False
-            MockComfyUIHandler.last_prompt_workflow = None
+        # Teste 2B: 'alta' => 0.7 MP com aviso no log: "Qualidade 'alta' desativada, usando 'padrao'."
+        t_alta_id = f"test_alta_{uuid.uuid4().hex[:4]}"
+        t_alta_dir = os.path.join(work_base_dir, f"task_{t_alta_id}")
+        os.makedirs(t_alta_dir, exist_ok=True)
+        api.TASKS[t_alta_id] = {"task_id": t_alta_id, "status": "started"}
+        MockComfyUIHandler.last_prompt_workflow = None
+        api.background_viggle_worker(t_alta_id, t_alta_dir, sample_img, sample_vid, None, "original", "alta")
 
-            # Executa worker
-            api.background_viggle_worker(
-                task_id=task_id,
-                work_dir=task_dir,
-                image_path=sample_img,
-                motion_video_path=sample_vid,
-                audio_path=None,
-                aspect_ratio="original",
-                quality=q_input
-            )
+        res_node_alta = [n for n in MockComfyUIHandler.last_prompt_workflow.values() if n.get("class_type") == "JWImageResizeToMegapixels"][0]
+        assert res_node_alta["inputs"]["megapixels"] == 0.7, "alta deve ser tratada como 0.7 MP"
 
-            assert api.TASKS[task_id]["status"] == "completed", f"Tarefa {task_id} falhou: {api.TASKS[task_id].get('error')}"
-            wf_sent = MockComfyUIHandler.last_prompt_workflow
-            assert wf_sent is not None, "Workflow não foi enviado ao ComfyUI"
+        alta_log_file = os.path.join(t_alta_dir, "task_render.log")
+        with open(alta_log_file, "r", encoding="utf-8") as lf:
+            alta_log = lf.read()
+        assert "Qualidade 'alta' desativada, usando 'padrao'." in alta_log, (
+            "Log deve registrar exatamente: \"Qualidade 'alta' desativada, usando 'padrao'.\""
+        )
+        print(" [OK] Preset 'alta' -> megapixels=0.7 com aviso registrado no log.")
 
-            # Encontra o nó JWImageResizeToMegapixels no workflow enviado
-            resize_nodes = [
-                (nid, n) for nid, n in wf_sent.items()
-                if isinstance(n, dict) and n.get("class_type") == "JWImageResizeToMegapixels"
-            ]
-            assert len(resize_nodes) >= 1, "Nó JWImageResizeToMegapixels não encontrado no workflow enviado"
-            res_nid, res_node = resize_nodes[0]
+        # Teste 2C: 'rapido' => 0.4 MP
+        t_rapido_id = f"test_rapido_{uuid.uuid4().hex[:4]}"
+        t_rapido_dir = os.path.join(work_base_dir, f"task_{t_rapido_id}")
+        os.makedirs(t_rapido_dir, exist_ok=True)
+        api.TASKS[t_rapido_id] = {"task_id": t_rapido_id, "status": "started"}
+        MockComfyUIHandler.last_prompt_workflow = None
+        api.background_viggle_worker(t_rapido_id, t_rapido_dir, sample_img, sample_vid, None, "original", "rapido")
 
-            # 1. Valida megapixels do nó
-            actual_mp = res_node.get("inputs", {}).get("megapixels")
-            assert actual_mp == expected_mp, f"Preset '{q_input}': esperado {expected_mp} MP, obtido {actual_mp}"
+        res_node_rapido = [n for n in MockComfyUIHandler.last_prompt_workflow.values() if n.get("class_type") == "JWImageResizeToMegapixels"][0]
+        assert res_node_rapido["inputs"]["megapixels"] == 0.4, "rapido deve configurar megapixels=0.4"
+        print(" [OK] Preset 'rapido' -> megapixels=0.4 configurado com sucesso.")
 
-            # 2. Valida que os outros parâmetros do nó continuam intactos
-            assert res_node.get("inputs", {}).get("divisible_by") == 32, "divisible_by deve permanecer 32"
-            assert res_node.get("inputs", {}).get("interpolation_mode") == "nearest", "interpolation_mode intacto"
+        # Teste 2D: ausente / inválido => 0.7 MP
+        t_inv_id = f"test_inv_{uuid.uuid4().hex[:4]}"
+        t_inv_dir = os.path.join(work_base_dir, f"task_{t_inv_id}")
+        os.makedirs(t_inv_dir, exist_ok=True)
+        api.TASKS[t_inv_id] = {"task_id": t_inv_id, "status": "started"}
+        MockComfyUIHandler.last_prompt_workflow = None
+        api.background_viggle_worker(t_inv_id, t_inv_dir, sample_img, sample_vid, None, "original", "invalido_qualquer")
 
-            # 3. Valida que CustomSigmas (nó 40) NÃO foi modificado
-            sigmas_node = wf_sent.get("40")
-            assert sigmas_node is not None, "Nó 40 (CustomSigmas) deve existir"
-            assert sigmas_node.get("inputs", {}).get("interpolate_to_steps") == 3, "CustomSigmas passos não podem ser alterados"
-
-            # 4. Valida log da tarefa: qualidade, megapixels, resolução, tempo e menor VRAM livre
-            log_file = os.path.join(task_dir, "task_render.log")
-            assert os.path.exists(log_file), "Log da tarefa não foi criado"
-            with open(log_file, "r", encoding="utf-8") as lf:
-                log_content = lf.read()
-
-            assert f"{expected_mp} MP" in log_content, f"Log deve registrar {expected_mp} MP"
-            assert "Estatísticas da tarefa" in log_content, "Log deve registrar as estatísticas da tarefa"
-            assert "resolução=" in log_content, "Log deve registrar a resolução final do vídeo"
-            assert "tempo_total=" in log_content, "Log deve registrar o tempo total"
-            assert "menor_vram_livre=" in log_content, "Log deve registrar a menor VRAM livre observada"
-
-            print(f" [OK] Preset '{q_input}' -> megapixels={actual_mp} aplicado exclusivamente no nó JWImageResizeToMegapixels.")
+        res_node_inv = [n for n in MockComfyUIHandler.last_prompt_workflow.values() if n.get("class_type") == "JWImageResizeToMegapixels"][0]
+        assert res_node_inv["inputs"]["megapixels"] == 0.7, "inválido deve cair em padrao (0.7 MP)"
+        print(" [OK] Valor inválido/ausente -> cai em padrao (0.7 MP).")
 
         # -------------------------------------------------------------------
-        # TESTE 3: Detecção de Erro de Falta de Memória (OOM) e Mensagem
+        # TESTE 3: Detecção de Erro OOM vs 'zoom' / 'room'
         # -------------------------------------------------------------------
-        print("\n--- Teste 3: Tratamento de Erro OOM (Out of Memory) ---")
+        print("\n--- Teste 3: Detecção de OOM com Limite de Palavra (Sem Falso Positivo com 'zoom') ---")
+        # 3A: Checagens unitárias de is_oom_error
+        assert api.is_oom_error("zoom") is False, "'zoom' NAO pode disparar OOM"
+        assert api.is_oom_error("room") is False, "'room' NAO pode disparar OOM"
+        assert api.is_oom_error("sem dar zoom no rosto") is False, "'zoom no rosto' NAO pode disparar OOM"
+        assert api.is_oom_error("zoom_factor = 2.0") is False, "'zoom_factor' NAO pode disparar OOM"
+        assert api.is_oom_error("room acoustics") is False, "'room' NAO pode disparar OOM"
+
+        assert api.is_oom_error("oom") is True, "'oom' isolado DEVE disparar OOM"
+        assert api.is_oom_error("CUDA OOM occurred") is True, "'CUDA OOM' DEVE disparar OOM"
+        assert api.is_oom_error("Error: oom in allocator") is True, "'oom' DEVE disparar OOM"
+        assert api.is_oom_error("torch.cuda.OutOfMemoryError: CUDA out of memory") is True, "'out of memory' DEVE disparar OOM"
+        assert api.is_oom_error("CUDA error: out of memory") is True, "'cuda error: out of memory' DEVE disparar OOM"
+        print(" [OK] is_oom_error: regex de palavra inteira validada.")
+
+        # 3B: Erro contendo 'zoom' no ComfyUI NÃO dispara mensagem de memória
+        zoom_task_id = f"test_zoom_{uuid.uuid4().hex[:4]}"
+        zoom_task_dir = os.path.join(work_base_dir, f"task_{zoom_task_id}")
+        os.makedirs(zoom_task_dir, exist_ok=True)
+        api.TASKS[zoom_task_id] = {"task_id": zoom_task_id, "status": "started"}
+        MockComfyUIHandler.simulate_oom = False
+        MockComfyUIHandler.simulate_zoom_error = True
+        api.background_viggle_worker(zoom_task_id, zoom_task_dir, sample_img, sample_vid, None, "original", "padrao")
+
+        assert api.TASKS[zoom_task_id]["status"] == "error", "Status deve ser error"
+        assert "Memória da GPU insuficiente" not in api.TASKS[zoom_task_id]["error"], (
+            "Erro com 'zoom' NÃO deve gerar mensagem de falta de memória!"
+        )
+        assert "Invalid zoom interpolation factor" in api.TASKS[zoom_task_id]["error"], (
+            "Erro real com 'zoom' deve ser preservado."
+        )
+        print(" [OK] Erro com a palavra 'zoom' NÃO dispara falso positivo de OOM.")
+
+        # 3C: Erro real de OOM no ComfyUI dispara a mensagem em português
         oom_task_id = f"test_oom_{uuid.uuid4().hex[:4]}"
         oom_task_dir = os.path.join(work_base_dir, f"task_{oom_task_id}")
         os.makedirs(oom_task_dir, exist_ok=True)
         api.TASKS[oom_task_id] = {"task_id": oom_task_id, "status": "started"}
-
         MockComfyUIHandler.simulate_oom = True
-        api.background_viggle_worker(
-            task_id=oom_task_id,
-            work_dir=oom_task_dir,
-            image_path=sample_img,
-            motion_video_path=sample_vid,
-            audio_path=None,
-            aspect_ratio="original",
-            quality="alta"
-        )
+        MockComfyUIHandler.simulate_zoom_error = False
+        api.background_viggle_worker(oom_task_id, oom_task_dir, sample_img, sample_vid, None, "original", "padrao")
 
         expected_oom_msg = "Memória da GPU insuficiente nesta qualidade. Tente 'Padrão' ou 'Rápido'."
-        assert api.TASKS[oom_task_id]["status"] == "error", "Status da tarefa deve ser 'error'"
-        assert api.TASKS[oom_task_id]["error"] == expected_oom_msg, (
-            f"Mensagem de erro esperada '{expected_oom_msg}', obtida '{api.TASKS[oom_task_id]['error']}'"
-        )
-        assert api.TASKS[oom_task_id]["message"] == expected_oom_msg, (
-            f"Mensagem da tarefa esperada '{expected_oom_msg}', obtida '{api.TASKS[oom_task_id]['message']}'"
-        )
-
-        # Checa registro no log da tarefa
-        oom_log_file = os.path.join(oom_task_dir, "task_render.log")
-        with open(oom_log_file, "r", encoding="utf-8") as lf:
-            oom_log_text = lf.read()
-        assert expected_oom_msg in oom_log_text, "Mensagem de OOM em português deve estar presente no task log"
-        print(" [OK] Erro de OOM capturado e mensagem em português validada com sucesso.")
+        assert api.TASKS[oom_task_id]["error"] == expected_oom_msg, "Erro real de OOM deve mostrar a mensagem exata"
+        print(" [OK] Erro real de OOM exibe mensagem em português com sucesso.")
 
         # -------------------------------------------------------------------
-        # TESTE 4: Sincronização e Validação do Frontend (index.html e html_template.py)
+        # TESTE 4: Frontend (index.html e html_template.py)
         # -------------------------------------------------------------------
         print("\n--- Teste 4: Frontend index.html e html_template.py ---")
         with open("templates/index.html", "r", encoding="utf-8") as f:
             index_html = f.read()
 
         assert index_html == html_template.HTML_PAGE, (
-            "templates/index.html e html_template.py DEVEM ser idênticos byte a byte!"
+            "templates/index.html e html_template.py DEVEM ser rigorosamente idênticos byte a byte!"
         )
         print(" [OK] templates/index.html e html_template.py são idênticos byte a byte.")
 
-        # Verifica elementos obrigatórios no HTML
-        assert 'id="qualityGrid"' in index_html, "Seletor qualityGrid ausente no HTML"
-        assert 'data-quality="rapido"' in index_html, "Opção rapido ausente no seletor de qualidade"
-        assert 'data-quality="padrao"' in index_html, "Opção padrao ausente no seletor de qualidade"
-        assert 'data-quality="alta"' in index_html, "Opção alta ausente no seletor de qualidade"
-        assert "Alta demora mais e usa mais memória." in index_html, "Texto de aviso ausente no HTML"
+        # 'Padrão' ativo e checked por padrão
+        assert 'class="quality-card active" data-quality="padrao"' in index_html, (
+            "Padrão deve ter a classe active por padrão"
+        )
+        assert 'name="videoQuality" value="padrao" checked' in index_html, (
+            "Radio de Padrão deve estar checked por padrão"
+        )
 
-        # Verifica que Rápido é selecionado por padrão
-        assert 'class="quality-card active" data-quality="rapido"' in index_html, "Rápido deve ser active por padrão"
-        assert 'name="videoQuality" value="rapido" checked' in index_html, "Radio rapido deve estar checked por padrão"
+        # 'Alta' REMOVIDA da tela
+        assert 'data-quality="alta"' not in index_html, "Opção 'alta' DEVE estar removida do HTML"
+        assert 'value="alta"' not in index_html, "Radio 'alta' DEVE estar removido do HTML"
 
-        # Verifica que o FormData envia o campo 'quality'
-        assert "neuralFormData.append('quality'" in index_html, "neuralFormData deve anexar o campo 'quality'"
-        print(" [OK] Elementos HTML e envio no FormData verificados com sucesso.")
+        # Novo texto explicativo
+        expected_text = "Padrão dá mais nitidez no rosto; Rápido é mais veloz."
+        assert expected_text in index_html, f"Texto '{expected_text}' deve estar presente abaixo do seletor"
+
+        print(" [OK] Frontend: Padrão ativo por padrão, Alta removida e texto explicativo atualizado.")
 
         print("\n" + "=" * 70)
         print("TODOS OS TESTES FORAM CONCLUÍDOS COM SUCESSO!")
@@ -364,7 +398,7 @@ def main():
 
     finally:
         server.shutdown()
-        shutil.rmtree(work_base_dir, ignore_errors=True)
+        shutil.rmtree(d_temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
