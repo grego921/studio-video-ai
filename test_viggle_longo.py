@@ -132,6 +132,10 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/system_stats":
+            if getattr(MockComfyUISimulator, "system_stats_crash", False):
+                self.send_response(500)
+                self.end_headers()
+                return
             data = {
                 "system": {"os": "linux", "python_version": "3.10"},
                 "devices": [{"name": "NVIDIA A100-SXM4-40GB", "type": "cuda", "index": 0, "vram_total": 42949672960, "vram_free": 25000000000}]
@@ -687,6 +691,12 @@ def run_tests():
         assert len(h_colab["workflow_problems"]) == 0
         print(" [OK] Célula 5: Health check final confirmou ready=True com ambos os workflows válidos!")
 
+        with open("Viggle_Studio_Colab.ipynb", "r", encoding="utf-8") as f:
+            nb_txt = f.read()
+        assert "ATENÇÃO: esta GPU não é a A100. Vídeos longos podem falhar" in nb_txt
+        assert "GPU DETECTADA" in nb_txt
+        print(" [OK] Célula de hardware do notebook exibe destaque da GPU e aviso para VRAM < 35 GB.")
+
     finally:
         api.WORKFLOW_API_PATH = orig_api_wf
         api.WORKFLOW_LONGO_API_PATH = orig_longo_wf
@@ -1062,6 +1072,94 @@ def run_tests():
         api.COMFYUI_LOG_PATH = orig_comfy_log
         api.DRIVE_LOGS_DIR = orig_drive_logs
         shutil.rmtree(tmp_t12_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 13: Queda do ComfyUI Detectada no Loop de Espera (/system_stats falha 3x)
+    # =========================================================================
+    print("\n--- Teste 13: Detecção de Queda do ComfyUI (Falha 3x em /system_stats) ---")
+    tmp_t13_dir = tempfile.mkdtemp(prefix="test_crash_")
+    try:
+        sample_img13 = os.path.join(tmp_t13_dir, "face13.png")
+        Image.new("RGB", (256, 256), color=(200, 50, 50)).save(sample_img13)
+        sample_vid13 = os.path.join(tmp_t13_dir, "motion13.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=256x256:rate=24", "-c:v", "libx264", "-pix_fmt", "yuv420p", sample_vid13],
+            check=True, capture_output=True
+        )
+
+        MockComfyUISimulator.system_stats_crash = True
+        MockComfyUISimulator.history_empty = True
+        MockComfyUISimulator.interrupt_count = 0
+
+        orig_health_interval = api.HEALTH_CHECK_INTERVAL_S
+        orig_health_timeout = api.HEALTH_CHECK_TIMEOUT_S
+        orig_comfy_log = api.COMFYUI_LOG_PATH
+        api.HEALTH_CHECK_INTERVAL_S = 0.1
+        api.HEALTH_CHECK_TIMEOUT_S = 0.5
+
+        fake_log = os.path.join(tmp_t13_dir, "comfyui.log")
+        with open(fake_log, "w", encoding="utf-8") as f:
+            f.write("ComfyUI log line before crash\n")
+        api.COMFYUI_LOG_PATH = fake_log
+
+        tid_crash = "task_crash_comfyui"
+        t_work_crash = os.path.join(tmp_t13_dir, tid_crash)
+        os.makedirs(t_work_crash, exist_ok=True)
+        api.TASKS[tid_crash] = {"task_id": tid_crash, "status": "started"}
+
+        start_c = time.time()
+        api.background_viggle_worker(
+            tid_crash, t_work_crash, sample_img13, sample_vid13, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+        )
+        elapsed_c = time.time() - start_c
+
+        assert api.TASKS[tid_crash]["status"] in ("error", "failed")
+        assert api.TASKS[tid_crash]["error"] == api.COMFYUI_CRASH_MESSAGE, f"Esperado '{api.COMFYUI_CRASH_MESSAGE}', obteve '{api.TASKS[tid_crash].get('error')}'"
+        assert elapsed_c < 5.0, f"Deveria falhar rapidamente após 3 verificações, levou {elapsed_c}s"
+        assert MockComfyUISimulator.interrupt_count >= 1
+
+        with open(api.TASKS[tid_crash]["log_path"], "r", encoding="utf-8") as f:
+            t_log = f.read()
+        assert "Verificação de resposta do ComfyUI falhou" in t_log
+        assert "DUMP DIAGNÓSTICO COMFYUI.LOG" in t_log
+        print(" [OK] Queda do ComfyUI abortou a tarefa com a mensagem exata, dump de log e interrupt.")
+    finally:
+        MockComfyUISimulator.system_stats_crash = False
+        MockComfyUISimulator.history_empty = False
+        api.HEALTH_CHECK_INTERVAL_S = orig_health_interval
+        api.HEALTH_CHECK_TIMEOUT_S = orig_health_timeout
+        api.COMFYUI_LOG_PATH = orig_comfy_log
+        shutil.rmtree(tmp_t13_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 14: Injeção de min/max duration no Frontend e Clamping para 5s
+    # =========================================================================
+    print("\n--- Teste 14: Injeção de min/max duration no Frontend e Clamping para 5s ---")
+    # 14a. Verifica templates/index.html e html_template.py
+    with open("templates/index.html", "r", encoding="utf-8") as f:
+        html_src = f.read()
+    assert "neuralFormData.append('min_duration', minTimeSlider.value);" in html_src
+    assert "neuralFormData.append('max_duration', maxTimeSlider.value);" in html_src
+    import html_template
+    assert html_src == html_template.HTML_PAGE
+    print(" [OK] Frontend templates/index.html e html_template.py injetam min_duration e max_duration em neuralFormData.")
+
+    # 14b. Simula vídeo de movimento de 30.67s (736 quadros) com pedido explícito de 5s (min=5, max=5)
+    tmp_t14_dir = tempfile.mkdtemp(prefix="test_t14_")
+    try:
+        vid_30s = os.path.join(tmp_t14_dir, "vid_30s.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=30.67:size=256x256:rate=24", "-c:v", "libx264", "-pix_fmt", "yuv420p", vid_30s],
+            check=True, capture_output=True
+        )
+        # Sem áudio, vídeo 30.67s, pedido min=5, max=5
+        t, f_cnt, mn, mx, is_long = api.calculate_target_duration(None, vid_30s, 5.0, 5.0)
+        assert abs(t - 5.0) <= 0.1, f"Alvo deveria ser 5.0s, obteve {t}"
+        assert abs(f_cnt - 120) <= 1, f"Frames deveriam ser 120 (5s a 24fps), obteve {f_cnt}"
+        assert is_long is False, "Não deve ativar modo longo (>124 quadros) para pedido de 5s!"
+        print(f" [OK] Pedido de 5s (min=5, max=5) com vídeo de 30.67s: travado em {t:.1f}s ({f_cnt} quadros, modo curto). Não virou 736 quadros!")
+    finally:
+        shutil.rmtree(tmp_t14_dir, ignore_errors=True)
 
     # Limpeza do diretório base de testes se criado
     if created_temp_root and os.path.exists(created_temp_root):

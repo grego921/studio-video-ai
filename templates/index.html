@@ -2291,6 +2291,10 @@
           const chosenQuality = selQualityEl ? (selQualityEl.dataset.quality || selQualityEl.querySelector('input[type="radio"]')?.value) : 'padrao';
           neuralFormData.append('quality', chosenQuality || 'padrao');
 
+          // Duração Mínima e Máxima (controlada pelos sliders do painel)
+          neuralFormData.append('min_duration', minTimeSlider.value);
+          neuralFormData.append('max_duration', maxTimeSlider.value);
+
           // Vídeo de movimento (obrigatório para o motor Viggle-Animate)
           const motionVidInput = document.getElementById('motionVideoInput');
           if (!motionVidInput || !motionVidInput.files || !motionVidInput.files[0]) {

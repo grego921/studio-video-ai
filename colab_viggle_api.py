@@ -87,6 +87,11 @@ HISTORY_POLL_TIMEOUT_S = float(os.environ.get("HISTORY_POLL_TIMEOUT_S", 10.0))  
 COMFYUI_LOG_PATH = os.environ.get("COMFYUI_LOG_PATH", "/content/comfyui.log")
 DRIVE_LOGS_DIR = os.environ.get("DRIVE_LOGS_DIR", "/content/drive/MyDrive/StudioVideoAI/logs")
 
+HEALTH_CHECK_INTERVAL_S = float(os.environ.get("HEALTH_CHECK_INTERVAL_S", 10.0))
+HEALTH_CHECK_TIMEOUT_S = float(os.environ.get("HEALTH_CHECK_TIMEOUT_S", 3.0))
+HEALTH_CHECK_MAX_FAILURES = int(os.environ.get("HEALTH_CHECK_MAX_FAILURES", 3))
+COMFYUI_CRASH_MESSAGE = "O ComfyUI caiu durante o processamento (provável falta de memória). Tente uma duração menor ou qualidade Rápido."
+
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
@@ -168,6 +173,31 @@ def dump_comfyui_log_on_timeout(task_log_path: str = None):
     except Exception as e:
         if task_log_path:
             append_task_log(task_log_path, f"⚠️ Falha ao ler log do ComfyUI para diagnóstico ({e})")
+
+def read_dmesg_oom_lines(max_lines=30) -> list:
+    """Tenta ler linhas de OOM do kernel via dmesg (se houver permissão). Ignora erros."""
+    try:
+        res = subprocess.run(["dmesg", "-T"], capture_output=True, text=True, timeout=3)
+        if res.returncode != 0:
+            res = subprocess.run(["dmesg"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and res.stdout:
+            keywords = ["out of memory", "oom-killer", "killed process", "invoked oom-killer", "oom_reaper"]
+            lines = [l.strip() for l in res.stdout.splitlines() if any(k in l.lower() for k in keywords)]
+            return lines[-max_lines:]
+    except Exception:
+        pass
+    return []
+
+def log_dmesg_oom_if_available(task_log_path: str = None):
+    """Registra linhas de OOM do dmesg no log da tarefa se disponíveis."""
+    oom_lines = read_dmesg_oom_lines()
+    if oom_lines:
+        msg_header = f"⚠️ Registros de OOM detectados no kernel (dmesg) ({len(oom_lines)} linhas):"
+        if task_log_path:
+            append_task_log(task_log_path, msg_header)
+            for line in oom_lines:
+                append_task_log(task_log_path, f"  {line}")
+        print(f"{msg_header}\n" + "\n".join(oom_lines))
 
 def is_link_value(val) -> bool:
     """Verifica se um valor de entrada é uma conexão/link para outro nó [node_id, slot]."""
@@ -1394,6 +1424,8 @@ def background_viggle_worker(
         is_finalizing = False
         finalizing_start_time = None
         last_finalizing_log_time = 0.0
+        last_health_check_time = 0.0
+        consecutive_health_failures = 0
 
         try:
             while not completed:
@@ -1484,21 +1516,35 @@ def background_viggle_worker(
                 except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
                     pass
 
-                # (c) Consulta periódica a /system_stats para monitorar menor VRAM livre
-                if (now - last_vram_poll_time) >= 2.0:
-                    last_vram_poll_time = now
+                # (c) Verificação de saúde periódica a cada 10 s (GET /system_stats com timeout curto)
+                if (now - last_health_check_time) >= HEALTH_CHECK_INTERVAL_S:
+                    last_health_check_time = now
+                    stats_ok = False
                     try:
                         sreq = urllib.request.Request(f"{COMFYUI_URL}/system_stats", headers={"User-Agent": "StudioVideoAI"})
-                        with urllib.request.urlopen(sreq, timeout=5.0) as s_resp:
-                            s_data = json.loads(s_resp.read().decode("utf-8"))
-                            for dev in s_data.get("devices", []):
-                                vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
-                                if vf is not None:
-                                    free_gb = round(float(vf) / (1024 ** 3), 2)
-                                    if min_vram_free_gb is None or free_gb < min_vram_free_gb:
-                                        min_vram_free_gb = free_gb
-                    except (TimeoutError, socket.timeout, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.HTTPException):
-                        pass
+                        with urllib.request.urlopen(sreq, timeout=HEALTH_CHECK_TIMEOUT_S) as s_resp:
+                            if s_resp.status == 200:
+                                s_data = json.loads(s_resp.read().decode("utf-8"))
+                                stats_ok = True
+                                consecutive_health_failures = 0
+                                for dev in s_data.get("devices", []):
+                                    vf = dev.get("vram_free") if dev.get("vram_free") is not None else dev.get("torch_vram_free")
+                                    if vf is not None:
+                                        free_gb = round(float(vf) / (1024 ** 3), 2)
+                                        if min_vram_free_gb is None or free_gb < min_vram_free_gb:
+                                            min_vram_free_gb = free_gb
+                    except Exception:
+                        stats_ok = False
+
+                    if not stats_ok:
+                        consecutive_health_failures += 1
+                        append_task_log(task_log_path, f"⚠️ Verificação de resposta do ComfyUI falhou ({consecutive_health_failures}/{HEALTH_CHECK_MAX_FAILURES}).")
+                        if consecutive_health_failures >= HEALTH_CHECK_MAX_FAILURES:
+                            dump_comfyui_log_on_timeout(task_log_path)
+                            log_dmesg_oom_if_available(task_log_path)
+                            interrupt_comfyui()
+                            append_task_log(task_log_path, f"❌ {COMFYUI_CRASH_MESSAGE}")
+                            raise RuntimeError(COMFYUI_CRASH_MESSAGE)
 
                 # (d) Consulta fila atual para telemetria de nó e progresso
                 try:
@@ -1695,7 +1741,9 @@ def background_viggle_worker(
     except Exception as e:
         interrupt_comfyui()
         err_raw = str(e)
-        if is_oom_error(err_raw):
+        if COMFYUI_CRASH_MESSAGE in err_raw or err_raw == COMFYUI_CRASH_MESSAGE:
+            user_msg = COMFYUI_CRASH_MESSAGE
+        elif is_oom_error(err_raw):
             user_msg = oom_msg
         else:
             user_msg = f"Falha na renderização Viggle: {err_raw}"
