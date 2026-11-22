@@ -20,6 +20,7 @@ import urllib.request
 import urllib.error
 import http.client
 from flask import Flask, request, jsonify, send_file
+from pathlib import Path
 from PIL import Image
 
 try:
@@ -44,6 +45,7 @@ WORKFLOW_LONGO_BLOCOS_API_PATH = os.environ.get("WORKFLOW_LONGO_BLOCOS_API_PATH"
 
 MODELS_DIR = os.path.join(COMFYUI_DIR, "models")
 DRIVE_MODELS_DIR = os.environ.get("DRIVE_MODELS_DIR", os.path.abspath("/content/drive/MyDrive/StudioVideoAI/models"))
+DRIVE_VIGGLE_CHUNKS_DIR = os.environ.get("DRIVE_VIGGLE_CHUNKS_DIR", os.path.abspath("/content/drive/MyDrive/StudioVideoAI/viggle_chunks"))
 DIFFUSION_MODEL_PATH = os.environ.get(
     "DIFFUSION_MODEL_PATH",
     os.path.join(MODELS_DIR, "diffusion_models/minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors")
@@ -562,6 +564,204 @@ def plan_viggle_spans(total_f: int, chunk_f: int = 124, overlap_f: int = 5) -> l
         starts.append(last)
     return [(_l2f(s), _l2f(s + L) - 1, s, L) for s in starts]
 
+def ensure_viggle_chunks_local_dir(comfy_dir: str = None, task_log_path: str = None) -> bool:
+    """
+    Verifica que (output/viggle_chunks).resolve() está dentro de output.resolve().
+    Se for um link simbólico ou apontar para fora de output, desfaz o link e
+    cria uma pasta real local dentro de ComfyUI/output.
+    """
+    c_dir = comfy_dir or COMFYUI_DIR
+    output_path = Path(c_dir) / "output"
+    chunks_path = output_path / "viggle_chunks"
+
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+        out_resolved = output_path.resolve()
+
+        needs_fix = False
+        if chunks_path.is_symlink() or os.path.islink(str(chunks_path)):
+            needs_fix = True
+        elif chunks_path.exists():
+            chunks_resolved = chunks_path.resolve()
+            try:
+                is_rel = chunks_resolved.is_relative_to(out_resolved)
+            except AttributeError:
+                is_rel = str(chunks_resolved).startswith(str(out_resolved))
+            if not is_rel:
+                needs_fix = True
+
+        if needs_fix:
+            curr_target = str(chunks_path.resolve()) if chunks_path.exists() else "desconhecido"
+            msg = (
+                f"Aviso: {chunks_path} é um link simbólico ou aponta para fora de output ({curr_target}). "
+                f"Substituindo por diretório real local..."
+            )
+            if task_log_path:
+                append_task_log(task_log_path, msg)
+            try:
+                if chunks_path.is_symlink() or os.path.islink(str(chunks_path)):
+                    try:
+                        os.unlink(str(chunks_path))
+                    except Exception:
+                        try:
+                            os.rmdir(str(chunks_path))
+                        except Exception:
+                            shutil.rmtree(str(chunks_path), ignore_errors=True)
+                elif os.path.isdir(str(chunks_path)):
+                    try:
+                        os.rmdir(str(chunks_path))
+                    except Exception:
+                        try:
+                            os.unlink(str(chunks_path))
+                        except Exception:
+                            shutil.rmtree(str(chunks_path), ignore_errors=True)
+                else:
+                    try:
+                        os.unlink(str(chunks_path))
+                    except Exception:
+                        shutil.rmtree(str(chunks_path), ignore_errors=True)
+            except Exception as e_rm:
+                if task_log_path:
+                    append_task_log(task_log_path, f"Aviso ao remover link simbólico viggle_chunks: {e_rm}")
+
+        chunks_path.mkdir(parents=True, exist_ok=True)
+
+        final_resolved = chunks_path.resolve()
+        try:
+            is_valid = final_resolved.is_relative_to(out_resolved)
+        except AttributeError:
+            is_valid = str(final_resolved).startswith(str(out_resolved))
+
+        if not is_valid:
+            if task_log_path:
+                append_task_log(task_log_path, f"Erro: {final_resolved} não está dentro de {out_resolved}!")
+            return False
+        return True
+    except Exception as e:
+        if task_log_path:
+            append_task_log(task_log_path, f"Aviso na verificação de pasta viggle_chunks: {e}")
+        return False
+
+def restore_viggle_checkpoints_from_drive(
+    run_name: str,
+    drive_base_dir: str = None,
+    comfy_dir: str = None,
+    task_log_path: str = None
+) -> int:
+    """
+    Se existir drive_base_dir/<run_name>, copia os arquivos de checkpoint para
+    comfy_dir/output/viggle_chunks/<run_name>.
+    Registra no log da tarefa quantos arquivos foram restaurados.
+    """
+    if not run_name:
+        return 0
+    d_base = drive_base_dir or DRIVE_VIGGLE_CHUNKS_DIR
+    c_dir = comfy_dir or COMFYUI_DIR
+    drive_run_dir = os.path.join(d_base, run_name)
+    local_run_dir = os.path.join(c_dir, "output", "viggle_chunks", run_name)
+
+    if not os.path.exists(drive_run_dir) or not os.path.isdir(drive_run_dir):
+        return 0
+
+    restored_count = 0
+    try:
+        os.makedirs(local_run_dir, exist_ok=True)
+        for root, _, files in os.walk(drive_run_dir):
+            rel = os.path.relpath(root, drive_run_dir)
+            target_dir = os.path.join(local_run_dir, rel) if rel != "." else local_run_dir
+            os.makedirs(target_dir, exist_ok=True)
+            for f in files:
+                src = os.path.join(root, f)
+                dst = os.path.join(target_dir, f)
+                should_copy = False
+                if not os.path.exists(dst):
+                    should_copy = True
+                else:
+                    try:
+                        s_stat = os.stat(src)
+                        d_stat = os.stat(dst)
+                        if s_stat.st_size != d_stat.st_size or (s_stat.st_mtime - d_stat.st_mtime > 0.5):
+                            should_copy = True
+                    except Exception:
+                        should_copy = True
+
+                if should_copy:
+                    try:
+                        shutil.copy2(src, dst)
+                        restored_count += 1
+                    except Exception as e_cp:
+                        if task_log_path:
+                            append_task_log(task_log_path, f"Aviso ao restaurar checkpoint '{f}' do Drive: {e_cp}")
+                elif os.path.exists(dst):
+                    restored_count += 1
+
+        if restored_count > 0 and task_log_path:
+            append_task_log(task_log_path, f"📦 Checkpoints restaurados do Google Drive para {run_name}: {restored_count} arquivo(s).")
+    except Exception as e:
+        if task_log_path:
+            append_task_log(task_log_path, f"Aviso ao restaurar checkpoints do Google Drive: {e}")
+    return restored_count
+
+def sync_viggle_checkpoints_to_drive(
+    run_name: str,
+    drive_base_dir: str = None,
+    comfy_dir: str = None,
+    task_log_path: str = None
+) -> int:
+    """
+    Copia incrementalmente arquivos novos ou alterados de
+    comfy_dir/output/viggle_chunks/<run_name> para drive_base_dir/<run_name>.
+    Compara por tamanho e data de modificação. Qualquer erro de cópia ou Drive
+    desmontado vira apenas aviso no log da tarefa, nunca falhando a execução.
+    Retorna o total de arquivos copiados nesta iteração.
+    """
+    if not run_name:
+        return 0
+    d_base = drive_base_dir or DRIVE_VIGGLE_CHUNKS_DIR
+    c_dir = comfy_dir or COMFYUI_DIR
+    local_run_dir = os.path.join(c_dir, "output", "viggle_chunks", run_name)
+    drive_run_dir = os.path.join(d_base, run_name)
+
+    if not os.path.exists(local_run_dir) or not os.path.isdir(local_run_dir):
+        return 0
+
+    synced_count = 0
+    try:
+        os.makedirs(drive_run_dir, exist_ok=True)
+        for root, _, files in os.walk(local_run_dir):
+            rel = os.path.relpath(root, local_run_dir)
+            target_dir = os.path.join(drive_run_dir, rel) if rel != "." else drive_run_dir
+            os.makedirs(target_dir, exist_ok=True)
+            for f in files:
+                src = os.path.join(root, f)
+                dst = os.path.join(target_dir, f)
+                should_copy = False
+                if not os.path.exists(dst):
+                    should_copy = True
+                else:
+                    try:
+                        s_stat = os.stat(src)
+                        d_stat = os.stat(dst)
+                        if s_stat.st_size != d_stat.st_size or (s_stat.st_mtime - d_stat.st_mtime > 0.5):
+                            should_copy = True
+                    except Exception:
+                        should_copy = True
+
+                if should_copy:
+                    try:
+                        shutil.copy2(src, dst)
+                        synced_count += 1
+                    except Exception as e_file:
+                        if task_log_path:
+                            append_task_log(task_log_path, f"Aviso ao sincronizar checkpoint '{f}' para o Drive: {e_file}")
+
+        if synced_count > 0 and task_log_path:
+            append_task_log(task_log_path, f"💾 Checkpoints sincronizados com o Google Drive ({run_name}): {synced_count} arquivo(s) novo(s)/atualizado(s).")
+    except Exception as e:
+        if task_log_path:
+            append_task_log(task_log_path, f"Aviso na sincronização de checkpoints para o Drive ({run_name}): {e}")
+    return synced_count
+
 def check_video_has_audio(video_path: str) -> bool:
     """Verifica se o vídeo de entrada contém uma faixa de áudio válida."""
     if not video_path or not os.path.exists(video_path):
@@ -628,7 +828,7 @@ def assemble_viggle_chunks(
 
     search_dirs = [
         os.path.join(comfy_dir, "output", "viggle_chunks", run_name) if run_name else None,
-        os.path.join("/content/drive/MyDrive/StudioVideoAI/viggle_chunks", run_name) if run_name else None,
+        os.path.join(DRIVE_VIGGLE_CHUNKS_DIR, run_name) if run_name else None,
         os.path.join(comfy_dir, "output", "viggle_chunks") if comfy_dir else None,
         os.path.join(comfy_dir, "output") if comfy_dir else None,
         work_dir
@@ -1551,6 +1751,14 @@ def background_viggle_worker(
 
         # Configurações específicas de modo (chunk_frames no longo, length no curto, run_name no loop)
         if is_long_mode:
+            ensure_viggle_chunks_local_dir(comfy_dir=COMFYUI_DIR, task_log_path=task_log_path)
+            if run_name:
+                restore_viggle_checkpoints_from_drive(
+                    run_name=run_name,
+                    drive_base_dir=DRIVE_VIGGLE_CHUNKS_DIR,
+                    comfy_dir=COMFYUI_DIR,
+                    task_log_path=task_log_path
+                )
             for nid, n in workflow.items():
                 if isinstance(n, dict):
                     if n.get("class_type") == "ViggleAnimateConditioningWindowed":
@@ -1684,11 +1892,22 @@ def background_viggle_worker(
         last_finalizing_log_time = 0.0
         last_health_check_time = 0.0
         consecutive_health_failures = 0
+        last_drive_sync_time = time.time()
 
         try:
             while not completed:
                 time.sleep(1.0)
                 now = time.time()
+
+                # Sincronização periódica de checkpoints com o Drive a cada 30 s no modo longo
+                if is_long_mode and run_name and (now - last_drive_sync_time) >= 30.0:
+                    last_drive_sync_time = now
+                    sync_viggle_checkpoints_to_drive(
+                        run_name=run_name,
+                        drive_base_dir=DRIVE_VIGGLE_CHUNKS_DIR,
+                        comfy_dir=COMFYUI_DIR,
+                        task_log_path=task_log_path
+                    )
 
                 # (a) Teto absoluto
                 if (now - start_time) > MAX_TOTAL_TIMEOUT_S:
@@ -1875,6 +2094,15 @@ def background_viggle_worker(
         finally:
             tracker.stop()
 
+        # Sincronização final de checkpoints para o Drive ao término da execução
+        if is_long_mode and run_name:
+            sync_viggle_checkpoints_to_drive(
+                run_name=run_name,
+                drive_base_dir=DRIVE_VIGGLE_CHUNKS_DIR,
+                comfy_dir=COMFYUI_DIR,
+                task_log_path=task_log_path
+            )
+
         # 8. Extrair arquivo de vídeo gerado ou montar blocos
         task_out_mp4 = os.path.join(work_dir, "viggle_raw_output.mp4")
 
@@ -2021,6 +2249,16 @@ def background_viggle_worker(
 
     except Exception as e:
         interrupt_comfyui()
+        if is_long_mode and run_name:
+            try:
+                sync_viggle_checkpoints_to_drive(
+                    run_name=run_name,
+                    drive_base_dir=DRIVE_VIGGLE_CHUNKS_DIR,
+                    comfy_dir=COMFYUI_DIR,
+                    task_log_path=task_log_path
+                )
+            except Exception:
+                pass
         err_raw = str(e)
         if COMFYUI_CRASH_MESSAGE_LONGO in err_raw or err_raw == COMFYUI_CRASH_MESSAGE_LONGO:
             user_msg = COMFYUI_CRASH_MESSAGE_LONGO
