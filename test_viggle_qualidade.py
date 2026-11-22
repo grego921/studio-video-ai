@@ -391,6 +391,9 @@ def main():
         assert expected_text in index_html, f"Texto '{expected_text}' deve estar presente abaixo do seletor"
 
         print(" [OK] Frontend: Padrão ativo por padrão, Alta removida e texto explicativo atualizado.")
+        assert "neuralFormData.append('min_duration', minTimeSlider.value);" in index_html
+        assert "neuralFormData.append('max_duration', maxTimeSlider.value);" in index_html
+        print(" [OK] Frontend: min_duration e max_duration injetados no neuralFormData.")
 
         print("\n" + "=" * 70)
         print("TODOS OS TESTES FORAM CONCLUÍDOS COM SUCESSO!")
