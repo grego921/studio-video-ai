@@ -80,8 +80,12 @@ def verify_and_ensure_symlink(comfy_path: str, drive_rel_path: str) -> bool:
     return False
 
 NO_PROGRESS_TIMEOUT_S = int(os.environ.get("NO_PROGRESS_TIMEOUT_S", 600))  # 10 min sem modificação no log
+FINAL_STAGE_TIMEOUT_S = int(os.environ.get("FINAL_STAGE_TIMEOUT_S", 1800))  # 30 min para etapa final de decodificação
 MAX_TOTAL_TIMEOUT_S = int(os.environ.get("MAX_TOTAL_TIMEOUT_S", 3 * 3600))  # 3 horas de teto absoluto
 HISTORY_POLL_TIMEOUT_S = float(os.environ.get("HISTORY_POLL_TIMEOUT_S", 10.0))  # 10s de timeout na consulta a /history
+
+COMFYUI_LOG_PATH = os.environ.get("COMFYUI_LOG_PATH", "/content/comfyui.log")
+DRIVE_LOGS_DIR = os.environ.get("DRIVE_LOGS_DIR", "/content/drive/MyDrive/StudioVideoAI/logs")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -122,6 +126,48 @@ def append_task_log(log_path, message):
             f.write(f"{timestamp} {message}\n")
     except Exception:
         pass
+
+def dump_comfyui_log_on_timeout(task_log_path: str = None):
+    """
+    Antes de qualquer interrupt por timeout, lê as últimas 80 linhas de COMFYUI_LOG_PATH
+    e anexa ao log da tarefa e a um arquivo datado em DRIVE_LOGS_DIR.
+    """
+    from datetime import datetime
+    if not os.path.exists(COMFYUI_LOG_PATH):
+        msg = f"Arquivo de log do ComfyUI ({COMFYUI_LOG_PATH}) não encontrado para dump de diagnóstico."
+        if task_log_path:
+            append_task_log(task_log_path, f"⚠️ {msg}")
+        return
+
+    try:
+        with open(COMFYUI_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        last_lines = lines[-80:] if len(lines) >= 80 else lines
+        log_content = "".join(last_lines).strip()
+
+        if task_log_path:
+            append_task_log(task_log_path, f"📋 --- DUMP DIAGNÓSTICO COMFYUI.LOG (ÚLTIMAS {len(last_lines)} LINHAS) ---")
+            append_task_log(task_log_path, log_content)
+            append_task_log(task_log_path, "📋 --- FIM DO DUMP COMFYUI.LOG ---")
+
+        try:
+            os.makedirs(DRIVE_LOGS_DIR, exist_ok=True)
+            now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dump_filename = f"comfyui_timeout_{now_str}.log"
+            dump_path = os.path.join(DRIVE_LOGS_DIR, dump_filename)
+            with open(dump_path, "w", encoding="utf-8") as df:
+                df.write(f"Dump automático do comfyui.log gerado em {datetime.now().isoformat()}\n")
+                df.write("Motivo: Timeout no processamento da tarefa\n")
+                df.write("=" * 70 + "\n")
+                df.write(log_content + "\n")
+            if task_log_path:
+                append_task_log(task_log_path, f"💾 Dump do log salvo no Google Drive: {dump_path}")
+        except Exception as de:
+            if task_log_path:
+                append_task_log(task_log_path, f"⚠️ Erro ao salvar dump do log no Google Drive ({de})")
+    except Exception as e:
+        if task_log_path:
+            append_task_log(task_log_path, f"⚠️ Falha ao ler log do ComfyUI para diagnóstico ({e})")
 
 def is_link_value(val) -> bool:
     """Verifica se um valor de entrada é uma conexão/link para outro nó [node_id, slot]."""
@@ -1345,6 +1391,9 @@ def background_viggle_worker(
         tracker = ComfyUIProgressTracker(COMFYUI_URL, client_id, prompt_id, sampler_node_id=sampler_nid)
         tracker.start()
         last_logged_chunk = None
+        is_finalizing = False
+        finalizing_start_time = None
+        last_finalizing_log_time = 0.0
 
         try:
             while not completed:
@@ -1353,6 +1402,7 @@ def background_viggle_worker(
 
                 # (a) Teto absoluto
                 if (now - start_time) > MAX_TOTAL_TIMEOUT_S:
+                    dump_comfyui_log_on_timeout(task_log_path)
                     interrupt_comfyui()
                     raise TimeoutError(f"Teto absoluto de segurança de {MAX_TOTAL_TIMEOUT_S}s excedido.")
 
@@ -1366,7 +1416,25 @@ def background_viggle_worker(
                 if tracker.last_progress_time > last_progress_time:
                     last_progress_time = tracker.last_progress_time
 
-                if tracker.current_chunk is not None:
+                # Detecção do estágio "finalizando" (último bloco iniciado: current_chunk == total_chunks)
+                if tracker.current_chunk is not None and tracker.total_chunks is not None:
+                    if tracker.current_chunk >= tracker.total_chunks:
+                        if not is_finalizing:
+                            is_finalizing = True
+                            finalizing_start_time = now
+                            last_finalizing_log_time = now
+                            last_progress_time = now
+                            append_task_log(task_log_path, "Entrando na etapa final: decodificando latentes e montando vídeo...")
+
+                if is_finalizing:
+                    TASKS[task_id]["stage"] = "finalizing"
+                    TASKS[task_id]["message"] = "Finalizando: decodificando e montando o vídeo..."
+                    TASKS[task_id]["progress_pct"] = 94.0
+                    if (now - last_finalizing_log_time) >= 60.0:
+                        elapsed_mins = max(1, int((now - finalizing_start_time) / 60.0))
+                        last_finalizing_log_time = now
+                        append_task_log(task_log_path, f"Finalizando há {elapsed_mins} min")
+                elif tracker.current_chunk is not None:
                     curr_c = tracker.current_chunk
                     tot_c = tracker.total_chunks or "?"
                     TASKS[task_id]["stage"] = "sampling"
@@ -1438,8 +1506,35 @@ def background_viggle_worker(
                     with urllib.request.urlopen(queue_req, timeout=5.0) as q_resp:
                         q_data = json.loads(q_resp.read().decode("utf-8"))
                         running = q_data.get("queue_running", [])
-                        if any(r and len(r) > 1 and r[1] == prompt_id for r in running):
+                        pending = q_data.get("queue_pending", [])
+                        in_running = any(r and len(r) > 1 and r[1] == prompt_id for r in running)
+                        in_pending = any(p and len(p) > 1 and p[1] == prompt_id for p in pending)
+                        if in_running and not is_finalizing:
                             last_progress_time = now
+
+                        # Se no estágio "finalizando" o prompt_id não estiver mais em /queue (nem running nem pending)
+                        # e não houver resultado em /history, falhar rápido com mensagem clara, sem esperar o limite.
+                        if is_finalizing and not in_running and not in_pending and not completed:
+                            hist_found = False
+                            try:
+                                h_chk_req = urllib.request.Request(f"{COMFYUI_URL}/history/{prompt_id}")
+                                with urllib.request.urlopen(h_chk_req, timeout=HISTORY_POLL_TIMEOUT_S) as h_chk_resp:
+                                    h_chk_data = json.loads(h_chk_resp.read().decode("utf-8"))
+                                    if prompt_id in h_chk_data:
+                                        h_item = h_chk_data[prompt_id]
+                                        if h_item.get("status", {}).get("completed", False):
+                                            completed = True
+                                            outputs = h_item.get("outputs", {})
+                                            hist_found = True
+                            except Exception:
+                                pass
+
+                            if not hist_found and not completed:
+                                dump_comfyui_log_on_timeout(task_log_path)
+                                interrupt_comfyui()
+                                err_msg = "ComfyUI finalizou o processamento do prompt sem registrar histórico ou saída de vídeo."
+                                append_task_log(task_log_path, f"❌ {err_msg}")
+                                raise RuntimeError(err_msg)
 
                     # Telemetria estimada dos estágios quando não há evento de bloco do WebSocket
                     if tracker.current_chunk is None:
@@ -1456,17 +1551,22 @@ def background_viggle_worker(
                             TASKS[task_id]["stage"] = "decoding"
                             TASKS[task_id]["message"] = "Decodificando latentes com VAE de vídeo..."
                             TASKS[task_id]["progress_pct"] = min(92.0, 75.0 + (elapsed - 15) * 1.5)
-                    else:
+                    elif not is_finalizing:
                         tot_denom = tracker.total_chunks or max(1, tracker.current_chunk)
                         TASKS[task_id]["progress_pct"] = min(94.0, round((tracker.current_chunk / tot_denom) * 80.0 + 15.0, 1))
 
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
 
                 # (e) Timeout por ausência de progresso
-                if (now - last_progress_time) > NO_PROGRESS_TIMEOUT_S:
+                timeout_limit = FINAL_STAGE_TIMEOUT_S if is_finalizing else NO_PROGRESS_TIMEOUT_S
+                if (now - last_progress_time) > timeout_limit:
+                    dump_comfyui_log_on_timeout(task_log_path)
                     interrupt_comfyui()
-                    raise TimeoutError(f"Ausência de progresso no ComfyUI por mais de {NO_PROGRESS_TIMEOUT_S} segundos.")
+                    stage_desc = "na etapa de finalização" if is_finalizing else "no ComfyUI"
+                    raise TimeoutError(f"Ausência de progresso {stage_desc} por mais de {timeout_limit} segundos.")
         finally:
             tracker.stop()
 
