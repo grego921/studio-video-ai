@@ -1,0 +1,300 @@
+{
+  "2": {
+    "inputs": {
+      "text_cond": "fixed_embed_fwd_anyframe.safetensors"
+    },
+    "class_type": "ViggleTextCondLoader",
+    "_meta": {
+      "title": "ViggleTextCondLoader"
+    }
+  },
+  "3": {
+    "inputs": {
+      "video": "ssstik.io_@funsizedreeee_1788834249891.mp4",
+      "force_rate": 24,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 260,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "AnimateDiff"
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {
+      "title": "INPUT_VIDEO"
+    }
+  },
+  "4": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "VAELoader"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "ChatGPT Image Sep 7, 2026, 09_40_07 AM.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "INPUT_IMAGE"
+    }
+  },
+  "9": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "11": {
+    "inputs": {
+      "model": [
+        "14",
+        0
+      ],
+      "conditioning": [
+        "36",
+        1
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "BasicGuider"
+    }
+  },
+  "13": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_viggle_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNETLoader"
+    }
+  },
+  "14": {
+    "inputs": {
+      "model": [
+        "69",
+        0
+      ],
+      "shift_video": 3,
+      "shift_audio": 3
+    },
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "MiniMaxH3SigmaShift"
+    }
+  },
+  "16": {
+    "inputs": {
+      "model": [
+        "13",
+        0
+      ],
+      "lora_name": "viggle_animate_dmd_lora_r64.safetensors",
+      "strength_model": 1
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoraLoaderModelOnly"
+    }
+  },
+  "21": {
+    "inputs": {
+      "images": [
+        "55",
+        0
+      ],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "viggle_bloco",
+      "format": "video/h264-mp4",
+      "pingpong": false,
+      "save_output": true
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "VHS_VideoCombine"
+    }
+  },
+  "22": {
+    "inputs": {
+      "model": [
+        "16",
+        0
+      ],
+      "attention": "comfy kitchen attention"
+    },
+    "class_type": "ModelAttentionBackend",
+    "_meta": {
+      "title": "ModelAttentionBackend"
+    }
+  },
+  "26": {
+    "inputs": {
+      "image": [
+        "3",
+        0
+      ],
+      "megapixels": 1.2,
+      "divisible_by": 32,
+      "interpolation_mode": "nearest"
+    },
+    "class_type": "JWImageResizeToMegapixels",
+    "_meta": {
+      "title": "JWImageResizeToMegapixels"
+    }
+  },
+  "36": {
+    "inputs": {
+      "cond_video": [
+        "26",
+        0
+      ],
+      "ref_image": [
+        "5",
+        0
+      ],
+      "text_cond": [
+        "2",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ],
+      "width": 0,
+      "height": 0,
+      "chunk_frames": 124,
+      "overlap_frames": 22,
+      "continuation": "five_frame_anchor"
+    },
+    "class_type": "ViggleAnimateConditioningWindowed",
+    "_meta": {
+      "title": "ViggleAnimateConditioningWindowed"
+    }
+  },
+  "45": {
+    "inputs": {
+      "sigmas_string": "1.0, 0.8571428571428571, 0.6, 0.0",
+      "interpolate_to_steps": 3
+    },
+    "class_type": "CustomSigmas",
+    "_meta": {
+      "title": "Custom Sigma 3 steps (Upstream “4-Step”)"
+    }
+  },
+  "52": {
+    "inputs": {
+      "cond_set": [
+        "36",
+        0
+      ],
+      "run_name": "viggle_run",
+      "resume": true
+    },
+    "class_type": "ViggleChunkLoopStart",
+    "_meta": {
+      "title": "ViggleChunkLoopStart"
+    }
+  },
+  "55": {
+    "inputs": {
+      "samples": [
+        "70",
+        1
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAEDecode"
+    }
+  },
+  "56": {
+    "inputs": {
+      "loop": [
+        "52",
+        0
+      ],
+      "chunk": [
+        "70",
+        0
+      ],
+      "images": [
+        "55",
+        0
+      ],
+      "after_save": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "ViggleChunkLoopEnd",
+    "_meta": {
+      "title": "ViggleChunkLoopEnd"
+    }
+  },
+  "69": {
+    "inputs": {
+      "model": [
+        "22",
+        0
+      ],
+      "selection": "sol-attn",
+      "selection.tau": 1.3,
+      "tau": 1.3,
+      "start_percent": 0.2,
+      "end_percent": 1,
+      "dense_blocks": "",
+      "min_tokens": 12288,
+      "extra_tokens": 256,
+      "sink_conditioning": "exact_kv_and_rows",
+      "verbose": false
+    },
+    "class_type": "BlockSparseAttention",
+    "_meta": {
+      "title": "BlockSparseAttention"
+    }
+  },
+  "70": {
+    "inputs": {
+      "state": [
+        "52",
+        1
+      ],
+      "guider": [
+        "11",
+        0
+      ],
+      "sampler": [
+        "9",
+        0
+      ],
+      "sigmas": [
+        "45",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ],
+      "seed": 0,
+      "rerender_chunk": 0,
+      "rerender_seed": 0
+    },
+    "class_type": "ViggleSampleChunk",
+    "_meta": {
+      "title": "SEED"
+    }
+  }
+}

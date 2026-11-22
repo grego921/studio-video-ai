@@ -106,6 +106,46 @@ MOCK_OBJECT_INFO = {
                 "rerender_seed": ["INT", {}]
             }
         }
+    },
+    "ViggleChunkLoopStart": {
+        "input": {
+            "required": {
+                "cond_set": ["VIGGLE_COND_SET", {}],
+                "run_name": ["STRING", {}],
+                "resume": ["BOOLEAN", {}]
+            },
+            "optional": {
+                "initial_state": ["VIGGLE_LOOP_STATE", {}]
+            }
+        }
+    },
+    "ViggleSampleChunk": {
+        "input": {
+            "required": {
+                "state": ["VIGGLE_LOOP_STATE", {}],
+                "guider": ["GUIDER", {}],
+                "sampler": ["SAMPLER", {}],
+                "sigmas": ["SIGMAS", {}],
+                "seed": ["INT", {}],
+                "rerender_chunk": ["INT", {}],
+                "rerender_seed": ["INT", {}]
+            },
+            "optional": {
+                "vae": ["VAE", {}]
+            }
+        }
+    },
+    "ViggleChunkLoopEnd": {
+        "input": {
+            "required": {
+                "loop": ["VIGGLE_LOOP", {}],
+                "chunk": ["VIGGLE_LOOP_STATE", {}],
+                "images": ["IMAGE", {}]
+            },
+            "optional": {
+                "after_save": ["*", {}]
+            }
+        }
     }
 }
 
@@ -1160,6 +1200,193 @@ def run_tests():
         print(f" [OK] Pedido de 5s (min=5, max=5) com vídeo de 30.67s: travado em {t:.1f}s ({f_cnt} quadros, modo curto). Não virou 736 quadros!")
     finally:
         shutil.rmtree(tmp_t14_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 15: Validação Estrutural de viggle_longo_blocos_api.json
+    # =========================================================================
+    print("\n--- Teste 15: Validação Estrutural de viggle_longo_blocos_api.json ---")
+    blocos_path = "workflows/viggle_longo_blocos_api.json"
+    assert os.path.exists(blocos_path), f"Arquivo não encontrado: {blocos_path}"
+    with open(blocos_path, "r", encoding="utf-8") as f:
+        wf_blocos = json.load(f)
+
+    valid_b, errs_b = bld.validate_api_workflow(wf_blocos, MOCK_OBJECT_INFO, raise_on_error=False)
+    assert valid_b, f"Falha na validação do workflow em blocos: {errs_b}"
+
+    # Validar presença dos nós obrigatórios do loop e seus títulos
+    titles_found = {}
+    class_types_found = set()
+    for nid, node in wf_blocos.items():
+        ctype = node.get("class_type")
+        class_types_found.add(ctype)
+        title = node.get("_meta", {}).get("title")
+        if title:
+            titles_found[title] = nid
+
+    for req_t in ["INPUT_IMAGE", "INPUT_VIDEO", "SEED"]:
+        assert req_t in titles_found, f"Título '{req_t}' ausente em viggle_longo_blocos_api.json"
+
+    # Validar que nó SEED é ViggleSampleChunk
+    seed_node = wf_blocos[titles_found["SEED"]]
+    assert seed_node.get("class_type") == "ViggleSampleChunk", f"SEED deve ser ViggleSampleChunk, obteve {seed_node.get('class_type')}"
+
+    # Validar que nós do loop estão presentes
+    assert "ViggleChunkLoopStart" in class_types_found, "ViggleChunkLoopStart deve estar presente"
+    assert "ViggleSampleChunk" in class_types_found, "ViggleSampleChunk deve estar presente"
+    assert "ViggleChunkLoopEnd" in class_types_found, "ViggleChunkLoopEnd deve estar presente"
+    assert "VAEDecode" in class_types_found, "VAEDecode deve estar presente"
+    assert "VHS_VideoCombine" in class_types_found, "VHS_VideoCombine deve estar presente"
+
+    # Validar que ViggleAssembleChunkLatents foi podado
+    assert "ViggleAssembleChunkLatents" not in class_types_found, "ViggleAssembleChunkLatents deve ser podado"
+
+    # Validar que VHS_VideoCombine tem save_output=True, filename_prefix e não tem audio
+    combine_node = next(n for n in wf_blocos.values() if n.get("class_type") == "VHS_VideoCombine")
+    assert combine_node["inputs"].get("save_output") is True, "save_output deve ser True"
+    assert "audio" not in combine_node["inputs"], "audio não deve estar presente no VHS_VideoCombine"
+    assert "viggle_bloco" in combine_node["inputs"].get("filename_prefix", ""), "filename_prefix deve ser viggle_bloco"
+
+    # Validar que ViggleSampleChunk tem vae conectado
+    assert "vae" in seed_node["inputs"], "ViggleSampleChunk deve ter entrada 'vae' conectada"
+
+    # Validar CustomSigmas com 3 passos
+    sigmas_nodes = [n for n in wf_blocos.values() if n.get("class_type") == "CustomSigmas"]
+    assert len(sigmas_nodes) == 1, "Deve haver exatamente 1 nó CustomSigmas ativo"
+    assert sigmas_nodes[0]["inputs"].get("interpolate_to_steps") == 3, "CustomSigmas deve ter 3 passos"
+
+    print(" [OK] viggle_longo_blocos_api.json validado estruturalmente com sucesso contra object_info.")
+
+    # =========================================================================
+    # Teste 16: Montagem FFmpeg de Blocos e Continuidade Estrita de Quadros
+    # =========================================================================
+    print("\n--- Teste 16: Montagem FFmpeg de Blocos e Continuidade Estrita de Quadros ---")
+    tmp_t16_dir = tempfile.mkdtemp(prefix="test_t16_")
+    try:
+        from PIL import Image
+
+        def encode_frame_id(n, size=(64, 64)):
+            img = Image.new("RGB", size, (0, 0, 0))
+            for b in range(10):
+                if (n >> b) & 1:
+                    for x in range(b * 6, b * 6 + 5):
+                        for y in range(20, 44):
+                            img.putpixel((x, y), (255, 255, 255))
+            return img
+
+        def decode_frame_id(img):
+            n = 0
+            for b in range(10):
+                val = img.getpixel((b * 6 + 2, 32))[0]
+                if val > 128:
+                    n |= (1 << b)
+            return n
+
+        def make_synthetic_block(start_f, end_f, out_path):
+            block_dir = tempfile.mkdtemp(dir=tmp_t16_dir)
+            cnt = end_f - start_f + 1
+            for idx in range(cnt):
+                gf = start_f + idx
+                encode_frame_id(gf).save(os.path.join(block_dir, f"frame_{idx:05d}.png"))
+            cmd = [
+                "ffmpeg", "-y", "-framerate", "24", "-i", os.path.join(block_dir, "frame_%05d.png"),
+                "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", out_path
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+
+        # Simular plano de janelas para 322 quadros (spans: [0, 123], [119, 242], [204, 327])
+        b1_file = os.path.join(tmp_t16_dir, "viggle_bloco_00001_.mp4")
+        b2_file = os.path.join(tmp_t16_dir, "viggle_bloco_00002_.mp4")
+        b3_file = os.path.join(tmp_t16_dir, "viggle_bloco_00003_.mp4")
+        make_synthetic_block(0, 123, b1_file)
+        make_synthetic_block(119, 242, b2_file)
+        make_synthetic_block(204, 327, b3_file)
+
+        assembled_out = os.path.join(tmp_t16_dir, "assembled_out.mp4")
+        t16_log = os.path.join(tmp_t16_dir, "task_t16.log")
+
+        res_path = api.assemble_viggle_chunks(
+            work_dir=tmp_t16_dir,
+            comfy_dir=tmp_t16_dir,
+            run_name="test_run",
+            target_frames=322,
+            task_log_path=t16_log,
+            output_mp4_path=assembled_out
+        )
+        assert os.path.exists(assembled_out) and os.path.getsize(assembled_out) > 0
+
+        # Extrair todos os quadros e verificar contagem exata e sequência contínua
+        extract_dir = os.path.join(tmp_t16_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        subprocess.run(["ffmpeg", "-y", "-i", assembled_out, os.path.join(extract_dir, "frame_%05d.png")], check=True, capture_output=True)
+        extracted = sorted(os.listdir(extract_dir))
+        assert len(extracted) == 322, f"Esperado exatamente 322 quadros, obteve {len(extracted)}"
+
+        # Decodificar os IDs de quadro e validar continuidade estrita sem saltos ou duplicatas
+        frame_vals = [decode_frame_id(Image.open(os.path.join(extract_dir, fn))) for fn in extracted]
+        expected_vals = list(range(322))
+        assert frame_vals == expected_vals, f"Sequência de quadros desalinhada! Mismatch no índice: {[(i, frame_vals[i], expected_vals[i]) for i in range(len(frame_vals)) if frame_vals[i] != expected_vals[i]][:5]}"
+        print(f" [OK] Montagem de 3 blocos recortou sobreposições e gerou exatamente 322 quadros contínuos sem saltos nem repetições.")
+
+    finally:
+        shutil.rmtree(tmp_t16_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 17: Seleção Correta do Workflow e Cálculo Determinístico de run_name
+    # =========================================================================
+    print("\n--- Teste 17: Seleção de Workflow e Cálculo Determinístico de run_name ---")
+    # 17a. Determinismo de run_name
+    r1 = api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "padrao", 720)
+    r2 = api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "padrao", 720)
+    assert r1 == r2, f"run_name deve ser determinístico: {r1} vs {r2}"
+    assert r1.startswith("viggle_")
+    import re
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", r1), "run_name deve respeitar regex do ComfyUI"
+
+    # 17b. Sensibilidade a cada parâmetro
+    assert r1 != api.compute_viggle_run_name("hash_img2", "hash_vid1", 12345, "padrao", 720), "Imagem diferente deve mudar run_name"
+    assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid2", 12345, "padrao", 720), "Vídeo diferente deve mudar run_name"
+    assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 99999, "padrao", 720), "Seed diferente deve mudar run_name"
+    assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "rapido", 720), "Qualidade diferente deve mudar run_name"
+    assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "padrao", 360), "Duração diferente deve mudar run_name"
+    print(" [OK] Cálculo determinístico de run_name validado com sensibilidade estrita a todos os parâmetros.")
+
+    # 17c. Seleção de workflow
+    # <= 124 quadros usa viggle_api.json
+    # > 124 quadros usa viggle_longo_blocos_api.json
+    try:
+        assert os.path.exists(api.WORKFLOW_API_PATH), "Workflow curto deve existir"
+        assert os.path.exists(api.WORKFLOW_LONGO_BLOCOS_API_PATH), "Workflow longo em blocos deve existir"
+
+        tid_short_wf = "task_short_wf_check"
+        tid_long_wf = "task_long_wf_check"
+        api.TASKS[tid_short_wf] = {"task_id": tid_short_wf, "status": "started"}
+        api.TASKS[tid_long_wf] = {"task_id": tid_long_wf, "status": "started"}
+
+        tmp_wf_check = tempfile.mkdtemp(prefix="test_wf_check_")
+        t_img_ck = os.path.join(tmp_wf_check, "img.png")
+        Image.new("RGB", (128, 128), color=(100, 100, 100)).save(t_img_ck)
+        t_vid_ck = os.path.join(tmp_wf_check, "vid.mp4")
+        subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=128x128:rate=24", "-c:v", "libx264", "-pix_fmt", "yuv420p", t_vid_ck], check=True, capture_output=True)
+
+        # Curto (min=5, max=5) -> <=124 quadros
+        api.background_viggle_worker(tid_short_wf, os.path.join(tmp_wf_check, "short"), t_img_ck, t_vid_ck, None, "original", "padrao", 5.0, 5.0)
+        assert api.TASKS[tid_short_wf]["workflow_mode"] == "curto", "Pedido <= 124 quadros deve ser modo curto"
+        assert MockComfyUISimulator.last_prompt is not None
+        sampler_classes = [n.get("class_type") for n in MockComfyUISimulator.last_prompt.values()]
+        assert "SamplerCustomAdvanced" in sampler_classes, "Workflow curto deve usar SamplerCustomAdvanced"
+        assert "ViggleChunkLoopStart" not in sampler_classes, "Workflow curto não deve ter loop"
+
+        # Longo (min=15, max=15) -> 360 quadros
+        api.background_viggle_worker(tid_long_wf, os.path.join(tmp_wf_check, "long"), t_img_ck, t_vid_ck, None, "original", "padrao", 15.0, 15.0)
+        assert api.TASKS[tid_long_wf]["workflow_mode"] == "longo", "Pedido > 124 quadros deve ser modo longo"
+        assert MockComfyUISimulator.last_prompt is not None
+        long_sampler_classes = [n.get("class_type") for n in MockComfyUISimulator.last_prompt.values()]
+        assert "ViggleChunkLoopStart" in long_sampler_classes, "Workflow longo deve usar ViggleChunkLoopStart (modo blocos)"
+        assert "ViggleSampleChunk" in long_sampler_classes, "Workflow longo deve usar ViggleSampleChunk"
+
+        print(" [OK] Seleção correta de workflow verificada: curto para <=124 quadros, longo em blocos para >124 quadros.")
+    finally:
+        shutil.rmtree(tmp_wf_check, ignore_errors=True)
 
     # Limpeza do diretório base de testes se criado
     if created_temp_root and os.path.exists(created_temp_root):
