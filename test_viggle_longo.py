@@ -1388,6 +1388,126 @@ def run_tests():
     finally:
         shutil.rmtree(tmp_wf_check, ignore_errors=True)
 
+    # =========================================================================
+    # Teste 18: Gestão de Checkpoints: Restauração, Sincronização Incremental,
+    # Tolerância a Falhas e Validação de Pasta Local Real
+    # =========================================================================
+    print("\n--- Teste 18: Gestão de Checkpoints (Restauração, Sincronização Incremental e Pasta Real) ---")
+    tmp_t18 = tempfile.mkdtemp(prefix="test_t18_")
+    try:
+        import pathlib
+        comfy_mock = os.path.join(tmp_t18, "ComfyUI")
+        out_dir = os.path.join(comfy_mock, "output")
+        os.makedirs(out_dir, exist_ok=True)
+        drive_mock = os.path.join(tmp_t18, "GoogleDrive", "viggle_chunks")
+        os.makedirs(drive_mock, exist_ok=True)
+        t18_log = os.path.join(tmp_t18, "task_t18.log")
+        run_name = "test_run_t18"
+
+        # 18a. Verificação e correção de link simbólico / pasta fora de output (item c)
+        external_dir = os.path.join(tmp_t18, "external_chunks")
+        os.makedirs(external_dir, exist_ok=True)
+        chunks_dir = os.path.join(out_dir, "viggle_chunks")
+
+        created_symlink = False
+        try:
+            os.symlink(external_dir, chunks_dir, target_is_directory=True)
+            created_symlink = True
+        except Exception:
+            try:
+                subprocess.run(
+                    f'cmd /c mklink /J "{chunks_dir}" "{external_dir}"',
+                    check=True,
+                    shell=True,
+                    capture_output=True
+                )
+                created_symlink = True
+            except Exception:
+                pass
+
+        if created_symlink:
+            ok = api.ensure_viggle_chunks_local_dir(comfy_dir=comfy_mock, task_log_path=t18_log)
+            assert ok is True
+            resolved_chunks = pathlib.Path(chunks_dir).resolve()
+            resolved_out = pathlib.Path(out_dir).resolve()
+            assert str(resolved_chunks).startswith(str(resolved_out))
+            assert not os.path.islink(chunks_dir)
+            print(" [OK] Link externo em ComfyUI/output/viggle_chunks detectado e substituído por pasta real.")
+        else:
+            ok = api.ensure_viggle_chunks_local_dir(comfy_dir=comfy_mock, task_log_path=t18_log)
+            assert ok is True
+            print(" [OK] Pasta real ComfyUI/output/viggle_chunks validada com sucesso.")
+
+        # 18b. Restauração de checkpoints do Drive para pasta local (item a)
+        drive_run = os.path.join(drive_mock, run_name)
+        os.makedirs(drive_run, exist_ok=True)
+        with open(os.path.join(drive_run, "chunk_001.pt"), "w", encoding="utf-8") as f:
+            f.write("latents_chunk_1")
+        with open(os.path.join(drive_run, "chunk_002.pt"), "w", encoding="utf-8") as f:
+            f.write("latents_chunk_2")
+
+        restored = api.restore_viggle_checkpoints_from_drive(
+            run_name=run_name,
+            drive_base_dir=drive_mock,
+            comfy_dir=comfy_mock,
+            task_log_path=t18_log
+        )
+        assert restored == 2, f"Esperado 2 arquivos restaurados do Drive, obteve {restored}"
+        local_run = os.path.join(chunks_dir, run_name)
+        assert os.path.exists(os.path.join(local_run, "chunk_001.pt"))
+        assert os.path.exists(os.path.join(local_run, "chunk_002.pt"))
+        with open(t18_log, "r", encoding="utf-8") as f:
+            log_content = f.read()
+        assert "Checkpoints restaurados do Google Drive" in log_content, "Log da tarefa deve registrar checkpoints restaurados"
+        print(f" [OK] {restored} checkpoint(s) restaurados do Drive para ComfyUI local com sucesso.")
+
+        # 18c. Sincronização incremental por tamanho e data (item b)
+        with open(os.path.join(local_run, "chunk_003.pt"), "w", encoding="utf-8") as f:
+            f.write("latents_chunk_3")
+        time.sleep(0.6)  # Diferença perceptível de mtime
+        with open(os.path.join(local_run, "chunk_001.pt"), "w", encoding="utf-8") as f:
+            f.write("latents_chunk_1_updated_content")
+
+        synced = api.sync_viggle_checkpoints_to_drive(
+            run_name=run_name,
+            drive_base_dir=drive_mock,
+            comfy_dir=comfy_mock,
+            task_log_path=t18_log
+        )
+        assert synced == 2, f"Esperado sincronizar 2 arquivos (1 novo + 1 alterado), obteve {synced}"
+        with open(os.path.join(drive_run, "chunk_001.pt"), "r", encoding="utf-8") as f:
+            assert f.read() == "latents_chunk_1_updated_content"
+        assert os.path.exists(os.path.join(drive_run, "chunk_003.pt"))
+
+        # Sincronização repetida sem alterações deve sincronizar 0 arquivos
+        synced_again = api.sync_viggle_checkpoints_to_drive(
+            run_name=run_name,
+            drive_base_dir=drive_mock,
+            comfy_dir=comfy_mock,
+            task_log_path=t18_log
+        )
+        assert synced_again == 0, f"Segunda sincronização sem alterações deve copiar 0 arquivos, obteve {synced_again}"
+        print(" [OK] Sincronização incremental validada (apenas arquivos novos ou alterados copiados).")
+
+        # 18d. Tolerância a erros de Drive (drive desmontado/inválido nunca falha tarefa)
+        invalid_parent = os.path.join(tmp_t18, "blocking_file")
+        with open(invalid_parent, "w", encoding="utf-8") as f:
+            f.write("blocking_file")
+        invalid_drive = os.path.join(invalid_parent, "viggle_chunks")
+        synced_err = api.sync_viggle_checkpoints_to_drive(
+            run_name=run_name,
+            drive_base_dir=invalid_drive,
+            comfy_dir=comfy_mock,
+            task_log_path=t18_log
+        )
+        assert synced_err == 0, "Erro de gravação no Drive deve retornar 0 e não levantar exceção"
+        with open(t18_log, "r", encoding="utf-8") as f:
+            log_content_err = f.read()
+        assert "Aviso" in log_content_err, "Erro de Drive deve registrar aviso no log da tarefa"
+        print(" [OK] Erro de escrita/Drive desmontado tratado como aviso sem falhar a execução.")
+    finally:
+        shutil.rmtree(tmp_t18, ignore_errors=True)
+
     # Limpeza do diretório base de testes se criado
     if created_temp_root and os.path.exists(created_temp_root):
         shutil.rmtree(created_temp_root, ignore_errors=True)
