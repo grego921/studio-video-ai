@@ -9,6 +9,7 @@ import sys
 import time
 import uuid
 import json
+import hashlib
 import re
 import shutil
 import socket
@@ -39,6 +40,7 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 RESULTS_DIR = os.environ.get("RESULTS_DIR", os.path.abspath("/content/output_videos"))
 WORKFLOW_API_PATH = os.environ.get("WORKFLOW_API_PATH", os.path.abspath("workflows/viggle_api.json"))
 WORKFLOW_LONGO_API_PATH = os.environ.get("WORKFLOW_LONGO_API_PATH", os.path.abspath("workflows/viggle_longo_api.json"))
+WORKFLOW_LONGO_BLOCOS_API_PATH = os.environ.get("WORKFLOW_LONGO_BLOCOS_API_PATH", os.path.abspath("workflows/viggle_longo_blocos_api.json"))
 
 MODELS_DIR = os.path.join(COMFYUI_DIR, "models")
 DRIVE_MODELS_DIR = os.environ.get("DRIVE_MODELS_DIR", os.path.abspath("/content/drive/MyDrive/StudioVideoAI/models"))
@@ -91,6 +93,11 @@ HEALTH_CHECK_INTERVAL_S = float(os.environ.get("HEALTH_CHECK_INTERVAL_S", 10.0))
 HEALTH_CHECK_TIMEOUT_S = float(os.environ.get("HEALTH_CHECK_TIMEOUT_S", 3.0))
 HEALTH_CHECK_MAX_FAILURES = int(os.environ.get("HEALTH_CHECK_MAX_FAILURES", 3))
 COMFYUI_CRASH_MESSAGE = "O ComfyUI caiu durante o processamento (provável falta de memória). Tente uma duração menor ou qualidade Rápido."
+COMFYUI_CRASH_MESSAGE_LONGO = (
+    "O ComfyUI caiu durante o processamento (provável falta de memória). "
+    "Ao repetir o pedido, a geração continuará de onde parou graças aos checkpoints salvos. "
+    "Ou tente uma duração menor ou qualidade Rápido."
+)
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -488,6 +495,222 @@ def calculate_target_duration(audio_path, video_path, min_duration_raw=5.0, max_
 
     return clamped_target, target_frames, min_d, max_d, is_long_mode
 
+def get_file_content_hash(filepath: str, max_bytes: int = 10 * 1024 * 1024) -> str:
+    """Calcula hash determinístico do arquivo de entrada."""
+    h = hashlib.sha256()
+    if not filepath or not os.path.exists(filepath):
+        h.update(str(filepath).encode("utf-8"))
+        return h.hexdigest()
+    file_size = os.path.getsize(filepath)
+    h.update(f"{os.path.basename(filepath)}_{file_size}_".encode("utf-8"))
+    try:
+        with open(filepath, "rb") as f:
+            bytes_read = 0
+            while bytes_read < max_bytes:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+                bytes_read += len(chunk)
+    except Exception:
+        h.update(str(filepath).encode("utf-8"))
+    return h.hexdigest()
+
+def compute_deterministic_seed(image_hash: str, motion_hash: str) -> int:
+    """Gera uma semente determinística de 32 bits a partir das entradas."""
+    raw = f"{image_hash}_{motion_hash}"
+    h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return int(h[:8], 16) % (2 ** 31 - 1)
+
+def compute_viggle_run_name(image_ref: str, motion_ref: str, seed: int, quality: str, target_frames_or_duration) -> str:
+    """
+    Gera run_name determinístico em conformidade com regex ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$.
+    Mesmos parâmetros = mesmo run_name; parâmetros diferentes = run_name diferente.
+    """
+    raw = f"{image_ref}_{motion_ref}_{seed}_{quality}_{target_frames_or_duration}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"viggle_{digest}"
+
+def plan_viggle_spans(total_f: int, chunk_f: int = 124, overlap_f: int = 5) -> list:
+    """
+    Calcula a grade de janelas de geração do Viggle-Animate (equivalente a plan_spans do repositório).
+    Retorna [(a, b, s, L), ...].
+    """
+    def _f2l(fc):
+        return 2 if fc <= 5 else ((fc - 5) // 17) * 5 + 2
+
+    def _l2f(k):
+        return 17 * (k // 5) + (0, 1, 5, 9, 13)[k % 5]
+
+    def _gen_f(fc):
+        fc = max(5, int(fc))
+        return fc + (5 - fc) % 17
+
+    L = _f2l(int(chunk_f))
+    total_f_gen = _gen_f(total_f)
+    total_lat = _f2l(total_f_gen)
+    if L < 7:
+        raise ValueError("Viggle-Animate: chunk_frames must be at least 22 frames.")
+    if L >= total_lat:
+        return [(0, int(total_f_gen) - 1, 0, total_lat)]
+    O = _f2l(max(5, int(overlap_f)))
+    O = max(2, min(O, L - 5))
+    stride = L - O
+    starts = list(range(0, total_lat - L + 1, stride))
+    last = total_lat - L
+    if starts[-1] != last:
+        starts.append(last)
+    return [(_l2f(s), _l2f(s + L) - 1, s, L) for s in starts]
+
+def check_video_has_audio(video_path: str) -> bool:
+    """Verifica se o vídeo de entrada contém uma faixa de áudio válida."""
+    if not video_path or not os.path.exists(video_path):
+        return False
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0", video_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return "audio" in res.stdout.strip().lower()
+    except Exception:
+        return False
+
+def discover_chunk_files(search_dirs: list, run_name: str = "") -> list:
+    """
+    Localiza os arquivos de vídeo dos blocos gerados pelo loop.
+    Retorna a lista de caminhos absolutos ordenada pelo índice do bloco (1..N).
+    """
+    candidates = []
+    seen = set()
+    for sdir in search_dirs:
+        if not sdir or not os.path.exists(sdir):
+            continue
+        for root, _, files in os.walk(sdir):
+            for f in files:
+                if f.lower().endswith((".mp4", ".mkv", ".webm")):
+                    full_p = os.path.join(root, f)
+                    if full_p in seen:
+                        continue
+                    seen.add(full_p)
+                    if run_name and run_name in full_p:
+                        candidates.append(full_p)
+                    elif "viggle_bloco" in f.lower():
+                        candidates.append(full_p)
+
+    def extract_index(path):
+        fname = os.path.basename(path)
+        m = re.findall(r"\d+", fname)
+        if m:
+            return int(m[-1])
+        return 0
+
+    candidates.sort(key=lambda p: (extract_index(p), os.path.getmtime(p)))
+    return candidates
+
+def assemble_viggle_chunks(
+    work_dir: str,
+    comfy_dir: str,
+    run_name: str,
+    target_frames: int,
+    task_log_path: str,
+    output_mp4_path: str,
+    history_outputs: dict = None
+) -> str:
+    """
+    Coleta os arquivos de vídeo dos blocos, calcula as sobreposições de acordo com plan_viggle_spans,
+    remove os quadros redundantes das cabeças dos blocos 2..N, concatena com FFmpeg e corta
+    exatamente no target_frames pedido.
+    """
+    spans = plan_viggle_spans(target_frames, chunk_f=124, overlap_f=5)
+    append_task_log(task_log_path, f"Plano de janelas: {len(spans)} bloco(s) planejado(s) para {target_frames} quadros alvo.")
+
+    search_dirs = [
+        os.path.join(comfy_dir, "output", "viggle_chunks", run_name) if run_name else None,
+        os.path.join("/content/drive/MyDrive/StudioVideoAI/viggle_chunks", run_name) if run_name else None,
+        os.path.join(comfy_dir, "output", "viggle_chunks") if comfy_dir else None,
+        os.path.join(comfy_dir, "output") if comfy_dir else None,
+        work_dir
+    ]
+    chunk_files = discover_chunk_files(search_dirs, run_name=run_name)
+
+    # Se não encontrou arquivos nos diretórios habituais, verifica history_outputs
+    if not chunk_files and history_outputs:
+        for nid, nout in history_outputs.items():
+            for key in ("videos", "gifs"):
+                if key in nout and nout[key]:
+                    for v in nout[key]:
+                        fn = v.get("filename")
+                        sub = v.get("subfolder", "")
+                        if fn:
+                            local_p = os.path.join(comfy_dir, "output", sub, fn)
+                            if os.path.exists(local_p):
+                                chunk_files.append(local_p)
+
+    if not chunk_files:
+        append_task_log(task_log_path, "Aviso: Nenhum arquivo de bloco específico encontrado para montagem.")
+        return ""
+
+    append_task_log(task_log_path, f"Encontrado(s) {len(chunk_files)} arquivo(s) de bloco(s) para montagem: {[os.path.basename(c) for c in chunk_files]}")
+
+    trim_heads = [0]
+    current_end = spans[0][1] if spans else 123
+    for k in range(1, len(chunk_files)):
+        if k < len(spans):
+            ak = spans[k][0]
+            bk = spans[k][1]
+            trim = max(0, current_end - ak + 1)
+            current_end = bk
+        else:
+            trim = 5
+        trim_heads.append(trim)
+
+    append_task_log(task_log_path, f"Sobreposições a remover da cabeça dos blocos: {trim_heads}")
+
+    filter_parts = []
+    stream_names = []
+    for idx, (cf, trim_cnt) in enumerate(zip(chunk_files, trim_heads)):
+        v_in = f"[{idx}:v]"
+        v_out = f"[v{idx}]"
+        if trim_cnt > 0:
+            filter_parts.append(f"{v_in}select='gte(n\\,{trim_cnt})',setpts=PTS-STARTPTS{v_out}")
+        else:
+            filter_parts.append(f"{v_in}setpts=PTS-STARTPTS{v_out}")
+        stream_names.append(v_out)
+
+    n_inputs = len(stream_names)
+    if n_inputs > 1:
+        concat_inputs = "".join(stream_names)
+        filter_parts.append(f"{concat_inputs}concat=n={n_inputs}:v=1:a=0[vconcat]")
+        filter_parts.append(f"[vconcat]trim=end_frame={target_frames},setpts=PTS-STARTPTS[vout]")
+    else:
+        filter_parts.append(f"[v0]trim=end_frame={target_frames},setpts=PTS-STARTPTS[vout]")
+
+    full_filter = ";".join(filter_parts)
+    cmd = ["ffmpeg", "-y"]
+    for cf in chunk_files:
+        cmd.extend(["-i", cf])
+    cmd.extend([
+        "-filter_complex", full_filter,
+        "-map", "[vout]",
+        "-c:v", "libx264",
+        "-crf", "14",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        output_mp4_path
+    ])
+
+    append_task_log(task_log_path, f"Executando montagem FFmpeg de {len(chunk_files)} bloco(s) para {target_frames} quadros...")
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0 or not os.path.exists(output_mp4_path) or os.path.getsize(output_mp4_path) == 0:
+        err_msg = res.stderr or res.stdout
+        append_task_log(task_log_path, f"Erro na montagem FFmpeg: {err_msg}")
+        raise RuntimeError(f"Erro na montagem FFmpeg dos blocos: {err_msg}")
+
+    append_task_log(task_log_path, f"✅ Montagem FFmpeg concluída com sucesso: '{os.path.basename(output_mp4_path)}' ({os.path.getsize(output_mp4_path)} bytes)")
+    return output_mp4_path
+
 class ComfyUIProgressTracker:
     """
     Escuta eventos do ComfyUI via WebSocket (/ws?clientId=...) em background thread.
@@ -828,6 +1051,13 @@ def check_environment_health():
         if not longo_valid:
             wf_problems.extend([f"[Longo] {p}" for p in longo_probs])
 
+    blocos_exists = os.path.exists(WORKFLOW_LONGO_BLOCOS_API_PATH)
+    blocos_valid = True
+    if blocos_exists:
+        blocos_valid, blocos_probs = validate_workflow_against_comfyui(WORKFLOW_LONGO_BLOCOS_API_PATH, COMFYUI_URL)
+        if not blocos_valid:
+            wf_problems.extend([f"[Blocos] {p}" for p in blocos_probs])
+
     ready = bool(
         comfy_ok and
         cuda_ok and
@@ -839,7 +1069,8 @@ def check_environment_health():
         workflow_exists and
         longo_exists and
         wf_valid and
-        longo_valid
+        longo_valid and
+        blocos_valid
     )
 
     return {
@@ -853,7 +1084,7 @@ def check_environment_health():
         "checkpoint_text_cond": ckpt_text_cond_ok,
         "checkpoint_vae": ckpt_vae_ok,
         "workflow_exists": bool(workflow_exists and longo_exists),
-        "workflow_valid": bool(wf_valid and longo_valid),
+        "workflow_valid": bool(wf_valid and longo_valid and blocos_valid),
         "workflow_problems": wf_problems,
         "gpu": gpu_name,
         "engine": "Viggle-Animate H3 (ComfyUI A100 Engine v1.0)",
@@ -1245,7 +1476,14 @@ def background_viggle_worker(
         append_task_log(task_log_path, f"Mídias preparadas no ComfyUI: imagem='{img_comfy_ref}', vídeo='{vid_comfy_ref}'")
 
         # 4. Carregar workflow correspondente ao modo
-        wf_path = WORKFLOW_LONGO_API_PATH if is_long_mode else WORKFLOW_API_PATH
+        if is_long_mode:
+            if os.path.exists(WORKFLOW_LONGO_BLOCOS_API_PATH):
+                wf_path = WORKFLOW_LONGO_BLOCOS_API_PATH
+            else:
+                wf_path = WORKFLOW_LONGO_API_PATH
+        else:
+            wf_path = WORKFLOW_API_PATH
+
         if not os.path.exists(wf_path):
             raise FileNotFoundError(f"Arquivo de workflow não encontrado: {wf_path}")
 
@@ -1254,6 +1492,18 @@ def background_viggle_worker(
 
         # Remove campos de instruções que não são nós
         workflow = {k: v for k, v in raw_wf.items() if isinstance(v, dict) and "class_type" in v}
+
+        # Calcular hashes determinísticos para run_name
+        img_hash = get_file_content_hash(temp_img)
+        vid_hash = get_file_content_hash(final_motion_path)
+
+        if is_long_mode:
+            new_seed = compute_deterministic_seed(img_hash, vid_hash)
+            run_name = compute_viggle_run_name(img_hash, vid_hash, new_seed, quality_key, target_frames)
+            append_task_log(task_log_path, f"Modo longo em blocos ativo: run_name='{run_name}', seed={new_seed}")
+        else:
+            new_seed = int(time.time() * 1000) % (2 ** 32 - 1)
+            run_name = None
 
         # 5. Localizar nós pelos títulos e preencher entradas
         # INPUT_IMAGE (LoadImage)
@@ -1285,14 +1535,13 @@ def background_viggle_worker(
         else:
             raise ValueError("Nó INPUT_VIDEO (VHS_LoadVideo) não encontrado no workflow API!")
 
-        # SEED (RandomNoise ou ViggleChunkedSampler)
+        # SEED (RandomNoise, ViggleChunkedSampler ou ViggleSampleChunk)
         nid_seed, node_seed = find_node_by_title(workflow, "SEED")
         if not node_seed:
             for nid, n in workflow.items():
-                if n.get("class_type") in ("RandomNoise", "KSampler", "KSamplerSelect", "ViggleChunkedSampler"):
+                if n.get("class_type") in ("RandomNoise", "KSampler", "KSamplerSelect", "ViggleChunkedSampler", "ViggleSampleChunk"):
                     nid_seed, node_seed = nid, n
                     break
-        new_seed = int(time.time() * 1000) % (2 ** 32 - 1)
         if node_seed:
             if "noise_seed" in node_seed.get("inputs", {}):
                 node_seed["inputs"]["noise_seed"] = new_seed
@@ -1300,12 +1549,21 @@ def background_viggle_worker(
                 node_seed["inputs"]["seed"] = new_seed
             append_task_log(task_log_path, f"Nó SEED [{nid_seed}] configurado com semente {new_seed}")
 
-        # Configurações específicas de modo (chunk_frames no longo, length no curto)
+        # Configurações específicas de modo (chunk_frames no longo, length no curto, run_name no loop)
         if is_long_mode:
             for nid, n in workflow.items():
-                if isinstance(n, dict) and n.get("class_type") == "ViggleAnimateConditioningWindowed":
-                    n.setdefault("inputs", {})["chunk_frames"] = 124
-                    append_task_log(task_log_path, f"Nó ViggleAnimateConditioningWindowed [{nid}] configurado com chunk_frames=124")
+                if isinstance(n, dict):
+                    if n.get("class_type") == "ViggleAnimateConditioningWindowed":
+                        n.setdefault("inputs", {})["chunk_frames"] = 124
+                        append_task_log(task_log_path, f"Nó ViggleAnimateConditioningWindowed [{nid}] configurado com chunk_frames=124")
+                    elif n.get("class_type") == "ViggleChunkLoopStart" and run_name:
+                        n.setdefault("inputs", {})["run_name"] = run_name
+                        n["inputs"]["resume"] = True
+                        append_task_log(task_log_path, f"Nó ViggleChunkLoopStart [{nid}] configurado com run_name='{run_name}', resume=True")
+                    elif n.get("class_type") == "VHS_VideoCombine" and run_name:
+                        n.setdefault("inputs", {})["filename_prefix"] = f"viggle_chunks/{run_name}/viggle_bloco"
+                        n["inputs"]["save_output"] = True
+                        append_task_log(task_log_path, f"Nó VHS_VideoCombine [{nid}] configurado com prefixo 'viggle_chunks/{run_name}/viggle_bloco'")
         else:
             for nid, n in workflow.items():
                 if isinstance(n, dict) and n.get("class_type") == "ViggleAnimateConditioning":
@@ -1543,8 +1801,9 @@ def background_viggle_worker(
                             dump_comfyui_log_on_timeout(task_log_path)
                             log_dmesg_oom_if_available(task_log_path)
                             interrupt_comfyui()
-                            append_task_log(task_log_path, f"❌ {COMFYUI_CRASH_MESSAGE}")
-                            raise RuntimeError(COMFYUI_CRASH_MESSAGE)
+                            crash_msg = COMFYUI_CRASH_MESSAGE_LONGO if is_long_mode else COMFYUI_CRASH_MESSAGE
+                            append_task_log(task_log_path, f"❌ {crash_msg}")
+                            raise RuntimeError(crash_msg)
 
                 # (d) Consulta fila atual para telemetria de nó e progresso
                 try:
@@ -1616,80 +1875,103 @@ def background_viggle_worker(
         finally:
             tracker.stop()
 
-        # 8. Extrair arquivo de vídeo gerado
-        TASKS[task_id]["stage"] = "saving"
-        TASKS[task_id]["progress_pct"] = 95.0
-        TASKS[task_id]["message"] = "Localizando e finalizando vídeo de saída..."
-
-        generated_video_filename = None
-        generated_subfolder = ""
-
-        for nid, nout in outputs.items():
-            if "gifs" in nout and nout["gifs"]:
-                first_item = nout["gifs"][0]
-                generated_video_filename = first_item.get("filename")
-                generated_subfolder = first_item.get("subfolder", "")
-                break
-            elif "videos" in nout and nout["videos"]:
-                first_item = nout["videos"][0]
-                generated_video_filename = first_item.get("filename")
-                generated_subfolder = first_item.get("subfolder", "")
-                break
-            elif "images" in nout and nout["images"]:
-                for im_item in nout["images"]:
-                    fname = im_item.get("filename", "")
-                    if fname.lower().endswith(".mp4"):
-                        generated_video_filename = fname
-                        generated_subfolder = im_item.get("subfolder", "")
-                        break
-
-        # Baixar do ComfyUI (/view) ou copiar do diretório output/
+        # 8. Extrair arquivo de vídeo gerado ou montar blocos
         task_out_mp4 = os.path.join(work_dir, "viggle_raw_output.mp4")
-        if generated_video_filename:
-            # Tenta cópia direta do filesystem local
-            comfy_output_path = os.path.join(COMFYUI_DIR, "output", generated_subfolder, generated_video_filename)
-            if os.path.exists(comfy_output_path):
-                shutil.copy2(comfy_output_path, task_out_mp4)
-                append_task_log(task_log_path, f"Vídeo copiado diretamente de: {comfy_output_path}")
-            else:
-                view_url = f"{COMFYUI_URL}/view?filename={generated_video_filename}&subfolder={generated_subfolder}&type=output"
-                append_task_log(task_log_path, f"Baixando vídeo via rota ComfyUI /view: {view_url}")
-                urllib.request.urlretrieve(view_url, task_out_mp4)
+
+        if is_long_mode:
+            TASKS[task_id]["stage"] = "assembling"
+            TASKS[task_id]["progress_pct"] = 95.0
+            TASKS[task_id]["message"] = "Montando o vídeo final..."
+            append_task_log(task_log_path, "Montando o vídeo final...")
+            try:
+                assemble_viggle_chunks(
+                    work_dir=work_dir,
+                    comfy_dir=COMFYUI_DIR,
+                    run_name=run_name,
+                    target_frames=target_frames,
+                    task_log_path=task_log_path,
+                    output_mp4_path=task_out_mp4,
+                    history_outputs=outputs
+                )
+            except Exception as e_ass:
+                append_task_log(task_log_path, f"Aviso na montagem em blocos: {e_ass}. Tentando localização padrão.")
 
         if not os.path.exists(task_out_mp4) or os.path.getsize(task_out_mp4) == 0:
-            # Fallback procurando arquivos mp4 gerados recentemente no output/
-            comfy_out_dir = os.path.join(COMFYUI_DIR, "output")
-            if os.path.exists(comfy_out_dir):
-                all_mp4s = []
-                for root, _, files in os.walk(comfy_out_dir):
-                    for f in files:
-                        if f.lower().endswith(".mp4"):
-                            p = os.path.join(root, f)
-                            all_mp4s.append((os.path.getmtime(p), p))
-                if all_mp4s:
-                    all_mp4s.sort(reverse=True)
-                    shutil.copy2(all_mp4s[0][1], task_out_mp4)
+            TASKS[task_id]["stage"] = "saving"
+            TASKS[task_id]["progress_pct"] = 95.0
+            TASKS[task_id]["message"] = "Localizando e finalizando vídeo de saída..."
+
+            generated_video_filename = None
+            generated_subfolder = ""
+
+            for nid, nout in outputs.items():
+                if "gifs" in nout and nout["gifs"]:
+                    first_item = nout["gifs"][0]
+                    generated_video_filename = first_item.get("filename")
+                    generated_subfolder = first_item.get("subfolder", "")
+                    break
+                elif "videos" in nout and nout["videos"]:
+                    first_item = nout["videos"][0]
+                    generated_video_filename = first_item.get("filename")
+                    generated_subfolder = first_item.get("subfolder", "")
+                    break
+                elif "images" in nout and nout["images"]:
+                    for im_item in nout["images"]:
+                        fname = im_item.get("filename", "")
+                        if fname.lower().endswith(".mp4"):
+                            generated_video_filename = fname
+                            generated_subfolder = im_item.get("subfolder", "")
+                            break
+
+            if generated_video_filename:
+                comfy_output_path = os.path.join(COMFYUI_DIR, "output", generated_subfolder, generated_video_filename)
+                if os.path.exists(comfy_output_path):
+                    shutil.copy2(comfy_output_path, task_out_mp4)
+                    append_task_log(task_log_path, f"Vídeo copiado diretamente de: {comfy_output_path}")
+                else:
+                    view_url = f"{COMFYUI_URL}/view?filename={generated_video_filename}&subfolder={generated_subfolder}&type=output"
+                    append_task_log(task_log_path, f"Baixando vídeo via rota ComfyUI /view: {view_url}")
+                    urllib.request.urlretrieve(view_url, task_out_mp4)
+
+            if not os.path.exists(task_out_mp4) or os.path.getsize(task_out_mp4) == 0:
+                comfy_out_dir = os.path.join(COMFYUI_DIR, "output")
+                if os.path.exists(comfy_out_dir):
+                    all_mp4s = []
+                    for root, _, files in os.walk(comfy_out_dir):
+                        for f in files:
+                            if f.lower().endswith(".mp4"):
+                                p = os.path.join(root, f)
+                                all_mp4s.append((os.path.getmtime(p), p))
+                    if all_mp4s:
+                        all_mp4s.sort(reverse=True)
+                        shutil.copy2(all_mp4s[0][1], task_out_mp4)
 
         if not os.path.exists(task_out_mp4) or os.path.getsize(task_out_mp4) == 0:
             raise FileNotFoundError("O ComfyUI concluiu o workflow, mas nenhum arquivo MP4 foi gerado ou retornado.")
 
-        # 9. Se o usuário enviou áudio ou texto, mixar áudio no vídeo final (sem lip-sync)
+        # 9. Se o usuário enviou áudio ou se o motion_video original possui áudio, mapear no vídeo final
         final_video_path = os.path.join(work_dir, f"video_viggle_{task_id}.mp4")
-        has_audio = bool(audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0)
+        has_user_audio = bool(audio_path and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0)
+        motion_has_audio = bool(final_motion_path and check_video_has_audio(final_motion_path))
+        effective_audio_path = audio_path if has_user_audio else (final_motion_path if motion_has_audio else None)
+        has_audio = bool(effective_audio_path)
 
-        if has_audio:
-            append_task_log(task_log_path, "🎵 Mixando áudio no vídeo final com ffmpeg (sem sincronia labial)...")
+        if effective_audio_path:
+            if not has_user_audio and motion_has_audio:
+                append_task_log(task_log_path, f"🎵 Áudio original detectado no motion_video '{os.path.basename(final_motion_path)}'. Mapeando para o vídeo final...")
+            else:
+                append_task_log(task_log_path, "🎵 Mixando áudio no vídeo final com ffmpeg (sem sincronia labial)...")
+
             cmd_audio = [
-                "ffmpeg", "-y", "-i", task_out_mp4, "-i", audio_path,
+                "ffmpeg", "-y", "-i", task_out_mp4, "-i", effective_audio_path,
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac", "-shortest",
                 final_video_path
             ]
             res_aud = subprocess.run(cmd_audio, capture_output=True, text=True)
             if res_aud.returncode != 0 or not os.path.exists(final_video_path) or os.path.getsize(final_video_path) == 0:
-                # Fallback re-encodando caso a cópia direta de stream falhe
                 cmd_fallback = [
-                    "ffmpeg", "-y", "-i", task_out_mp4, "-i", audio_path,
+                    "ffmpeg", "-y", "-i", task_out_mp4, "-i", effective_audio_path,
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
                     final_video_path
@@ -1699,7 +1981,6 @@ def background_viggle_worker(
                     append_task_log(task_log_path, f"Aviso ao mixar áudio: {res_aud.stderr or res_fb.stderr}. Mantendo sem áudio.")
                     shutil.copy2(task_out_mp4, final_video_path)
         else:
-            # Sem áudio do usuário: vídeo final sai sem áudio e a geração NÃO falha
             shutil.copy2(task_out_mp4, final_video_path)
 
         # 10. Ajuste de Aspect Ratio (TikTok / YouTube) se solicitado
@@ -1741,7 +2022,9 @@ def background_viggle_worker(
     except Exception as e:
         interrupt_comfyui()
         err_raw = str(e)
-        if COMFYUI_CRASH_MESSAGE in err_raw or err_raw == COMFYUI_CRASH_MESSAGE:
+        if COMFYUI_CRASH_MESSAGE_LONGO in err_raw or err_raw == COMFYUI_CRASH_MESSAGE_LONGO:
+            user_msg = COMFYUI_CRASH_MESSAGE_LONGO
+        elif COMFYUI_CRASH_MESSAGE in err_raw or err_raw == COMFYUI_CRASH_MESSAGE:
             user_msg = COMFYUI_CRASH_MESSAGE
         elif is_oom_error(err_raw):
             user_msg = oom_msg

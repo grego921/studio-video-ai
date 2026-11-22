@@ -62,6 +62,18 @@ CHUNKED_CANDIDATE_PATHS = [
     "temp_comfyui/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-chunked-sampler.json",
 ]
 
+ADVANCED_WORKFLOW_URL = (
+    "https://raw.githubusercontent.com/Saganaki22/ComfyUI-Viggle-Animate-H3/main/"
+    "example_workflows/viggle-animate-h3_workflow-long-video-advanced.json"
+)
+
+ADVANCED_CANDIDATE_PATHS = [
+    "workflows/viggle-animate-h3_workflow-long-video-advanced.json",
+    "custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-long-video-advanced.json",
+    "/content/ComfyUI/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-long-video-advanced.json",
+    "temp_comfyui/custom_nodes/ComfyUI-Viggle-Animate-H3/example_workflows/viggle-animate-h3_workflow-long-video-advanced.json",
+]
+
 
 def log_info(msg: str):
     print(f"[build_workflow] {msg}")
@@ -198,7 +210,7 @@ def fetch_object_info(comfy_url: str) -> dict:
         sys.exit(1)
 
 
-def load_ui_workflow(source_path_or_url: str, is_chunked: bool = False) -> dict:
+def load_ui_workflow(source_path_or_url: str, is_chunked: bool = False, is_blocos: bool = False) -> dict:
     """Carrega o JSON do workflow de interface a partir de arquivo local ou URL."""
     # 1. Se o caminho fornecido existir diretamente:
     if source_path_or_url and os.path.exists(source_path_or_url):
@@ -213,9 +225,16 @@ def load_ui_workflow(source_path_or_url: str, is_chunked: bool = False) -> dict:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    # 3. Detectar se busca chunked/longo
-    candidate_paths = CHUNKED_CANDIDATE_PATHS if is_chunked else DEFAULT_CANDIDATE_PATHS
-    fallback_url = CHUNKED_WORKFLOW_URL if is_chunked else DEFAULT_WORKFLOW_URL
+    # 3. Detectar se busca blocos (loop avançado), chunked/longo ou padrão/curto
+    if is_blocos:
+        candidate_paths = ADVANCED_CANDIDATE_PATHS
+        fallback_url = ADVANCED_WORKFLOW_URL
+    elif is_chunked:
+        candidate_paths = CHUNKED_CANDIDATE_PATHS
+        fallback_url = CHUNKED_WORKFLOW_URL
+    else:
+        candidate_paths = DEFAULT_CANDIDATE_PATHS
+        fallback_url = DEFAULT_WORKFLOW_URL
 
     # Tentar os caminhos padrão conhecidos:
     for candidate in candidate_paths:
@@ -294,42 +313,91 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
     link_map = {l[0]: l for l in links}
 
     # -------------------------------------------------------------------------
-    # 1. Identificar o nó VHS_VideoCombine de saída primária
-    #    (cuja entrada 'images' vem diretamente de um nó VAEDecode)
+    # 1. Identificar o nó VHS_VideoCombine de saída primária e se é modo Loop
     # -------------------------------------------------------------------------
+    loop_end_node = next((n for n in nodes if n.get("type") == "ViggleChunkLoopEnd"), None)
+    is_loop_workflow = loop_end_node is not None
+
     primary_output_id = None
-    all_video_combines = []
+    loop_end_id = None
+    sigmas_3step_id = None
 
-    for n in nodes:
-        if n.get("type") == "VHS_VideoCombine":
-            all_video_combines.append(n["id"])
-            for inp in n.get("inputs", []):
-                if inp.get("name") == "images" and inp.get("link") is not None:
-                    try:
-                        src_res = resolve_link_source(inp["link"], node_map, link_map)
-                    except Exception as e:
-                        raise ValueError(f"Erro ao resolver entrada 'images' do VHS_VideoCombine {n['id']}: {e}")
+    if is_loop_workflow:
+        loop_end_id = loop_end_node["id"]
+        # Encontrar CustomSigmas com 3 steps para ligar no ViggleSampleChunk
+        for n in nodes:
+            if n.get("type") == "CustomSigmas":
+                title_lower = (n.get("title") or "").lower()
+                wv = n.get("widgets_values", [])
+                if "3 step" in title_lower or (isinstance(wv, list) and 3 in wv):
+                    sigmas_3step_id = n["id"]
+                    break
+        if sigmas_3step_id is None:
+            for n in nodes:
+                if n.get("type") == "CustomSigmas":
+                    sigmas_3step_id = n["id"]
+                    break
 
-                    if src_res[0] != "PRIMITIVE":
-                        src_node = node_map.get(src_res[0])
-                        if src_node and src_node.get("type") in ("VAEDecode", "ViggleChunkedSampler"):
-                            primary_output_id = n["id"]
+        # Redirecionar entrada 'sigmas' do ViggleSampleChunk para o CustomSigmas de 3 steps
+        sample_chunk_node = next((n for n in nodes if n.get("type") == "ViggleSampleChunk"), None)
+        if sample_chunk_node and sigmas_3step_id is not None:
+            for inp in sample_chunk_node.get("inputs", []):
+                if inp.get("name") == "sigmas":
+                    for l in links:
+                        if l[1] == sigmas_3step_id and l[2] == 0:
+                            inp["link"] = l[0]
                             break
 
-    if primary_output_id is None:
-        raise ValueError(
-            f"Não foi possível identificar com 100% de certeza o nó VHS_VideoCombine primário. "
-            f"Nós VHS_VideoCombine encontrados: {all_video_combines}. "
-            f"Nenhum deles possui a entrada 'images' conectada diretamente a um VAEDecode ou ViggleChunkedSampler."
-        )
+        # Identificar VHS_VideoCombine conectado ao after_save do LoopEnd
+        for inp in loop_end_node.get("inputs", []):
+            if inp.get("name") == "after_save" and inp.get("link") is not None:
+                try:
+                    src_res = resolve_link_source(inp["link"], node_map, link_map)
+                    if src_res[0] != "PRIMITIVE":
+                        primary_output_id = src_res[0]
+                        break
+                except Exception:
+                    pass
 
-    log_info(f"Nó de saída primária identificado: VHS_VideoCombine ID {primary_output_id}")
+        if primary_output_id is None:
+            for n in nodes:
+                if n.get("type") == "VHS_VideoCombine":
+                    primary_output_id = n["id"]
+                    break
+
+        log_info(f"Modo Loop detectado: ViggleChunkLoopEnd ID {loop_end_id}, VHS_VideoCombine ID {primary_output_id}")
+    else:
+        all_video_combines = []
+        for n in nodes:
+            if n.get("type") == "VHS_VideoCombine":
+                all_video_combines.append(n["id"])
+                for inp in n.get("inputs", []):
+                    if inp.get("name") == "images" and inp.get("link") is not None:
+                        try:
+                            src_res = resolve_link_source(inp["link"], node_map, link_map)
+                        except Exception as e:
+                            raise ValueError(f"Erro ao resolver entrada 'images' do VHS_VideoCombine {n['id']}: {e}")
+
+                        if src_res[0] != "PRIMITIVE":
+                            src_node = node_map.get(src_res[0])
+                            if src_node and src_node.get("type") in ("VAEDecode", "ViggleChunkedSampler"):
+                                primary_output_id = n["id"]
+                                break
+
+        if primary_output_id is None:
+            raise ValueError(
+                f"Não foi possível identificar com 100% de certeza o nó VHS_VideoCombine primário. "
+                f"Nós VHS_VideoCombine encontrados: {all_video_combines}. "
+                f"Nenhum deles possui a entrada 'images' conectada diretamente a um VAEDecode ou ViggleChunkedSampler."
+            )
+
+        log_info(f"Nó de saída primária identificado: VHS_VideoCombine ID {primary_output_id}")
 
     # -------------------------------------------------------------------------
     # 2. Rastreamento e poda de dead-ends (Grafo de dependência reversa)
     # -------------------------------------------------------------------------
     reachable_node_ids = set()
-    queue = [primary_output_id]
+    queue = [loop_end_id, primary_output_id] if is_loop_workflow else [primary_output_id]
 
     while queue:
         curr_id = queue.pop(0)
@@ -473,6 +541,24 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
             api_node["inputs"]["rerender_chunk"] = 0
             api_node["inputs"]["rerender_seed"] = 0
 
+        elif ctype == "ViggleSampleChunk":
+            api_node["_meta"]["title"] = "SEED"
+            api_node["inputs"]["rerender_chunk"] = 0
+            api_node["inputs"]["rerender_seed"] = 0
+            if sigmas_3step_id is not None:
+                api_node["inputs"]["sigmas"] = [str(sigmas_3step_id), 0]
+            # Conectar VAE ao VAELoader para five_frame_anchor
+            vae_loader = next((nid2 for nid2 in reachable_node_ids if node_map[nid2].get("type") == "VAELoader"), None)
+            if vae_loader:
+                api_node["inputs"]["vae"] = [str(vae_loader), 0]
+
+        elif ctype == "ViggleChunkLoopStart":
+            api_node["inputs"]["resume"] = True
+            api_node["inputs"]["run_name"] = "viggle_run"
+
+        elif ctype == "ViggleChunkLoopEnd":
+            pass
+
         elif ctype == "CustomSigmas":
             api_node["inputs"]["sigmas_string"] = "1.0, 0.8571428571428571, 0.6, 0.0"
             api_node["inputs"]["interpolate_to_steps"] = 3
@@ -504,6 +590,8 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
         elif ctype == "VHS_VideoCombine":
             if nid == primary_output_id:
                 api_node["inputs"]["save_output"] = True
+                if is_loop_workflow:
+                    api_node["inputs"]["filename_prefix"] = "viggle_bloco"
             api_node["inputs"].pop("audio", None)
 
         api_workflow[str(nid)] = api_node
@@ -685,17 +773,25 @@ def main():
 
     args = parser.parse_args()
 
-    # Detectar preset chunked/longo
+    # Detectar preset blocos (loop avançado), chunked/longo ou padrão/curto
     in_lower = args.workflow_in.lower()
     out_lower = args.workflow_out.lower()
-    is_chunked = ("chunked" in in_lower or "longo" in in_lower or "chunked" in out_lower or "longo" in out_lower)
+    is_blocos = ("blocos" in in_lower or "advanced" in in_lower or "blocos" in out_lower)
+    is_chunked = ("chunked" in in_lower or "longo" in in_lower or "chunked" in out_lower or "longo" in out_lower) and not is_blocos
 
     if not args.workflow_out:
-        args.workflow_out = "workflows/viggle_longo_api.json" if is_chunked else "workflows/viggle_api.json"
+        if is_blocos:
+            args.workflow_out = "workflows/viggle_longo_blocos_api.json"
+        elif is_chunked:
+            args.workflow_out = "workflows/viggle_longo_api.json"
+        else:
+            args.workflow_out = "workflows/viggle_api.json"
+
+    mode_label = "LONGO EM BLOCOS (Loop Avançado)" if is_blocos else ("LONGO (Chunked Sampler)" if is_chunked else "PADRÃO / CURTO (Single-pass)")
 
     print("=" * 75)
     print("🛠️  BUILD VIGGLE WORKFLOW: GERADOR DE WORKFLOW API COMFYUI")
-    print(f"🎯 Modo selecionado: {'LONGO (Chunked Sampler)' if is_chunked else 'PADRÃO / CURTO (Single-pass)'}")
+    print(f"🎯 Modo selecionado: {mode_label}")
     print(f"📂 Arquivo de saída: {args.workflow_out}")
     print("=" * 75)
 
@@ -704,7 +800,7 @@ def main():
 
     # 2. Carregar workflow UI
     try:
-        wf_ui = load_ui_workflow(args.workflow_in, is_chunked=is_chunked)
+        wf_ui = load_ui_workflow(args.workflow_in, is_chunked=is_chunked, is_blocos=is_blocos)
     except Exception as e:
         log_err(f"Erro ao carregar workflow de interface: {e}")
         sys.exit(1)
