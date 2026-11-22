@@ -122,6 +122,8 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
     history_delay_seconds = 0.0
     history_disconnect_count = 0
     history_invalid_json_count = 0
+    history_empty = False
+    queue_running_prompt = False
     interrupt_count = 0
     queue_clear_count = 0
 
@@ -149,6 +151,13 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
 
         if self.path.startswith("/history/"):
             prompt_id = self.path.split("/history/")[-1]
+
+            if MockComfyUISimulator.history_empty:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
 
             if MockComfyUISimulator.history_delay_count > 0:
                 MockComfyUISimulator.history_delay_count -= 1
@@ -229,10 +238,13 @@ class MockComfyUISimulator(BaseHTTPRequestHandler):
             return
 
         if self.path == "/queue":
+            running = []
+            if MockComfyUISimulator.queue_running_prompt:
+                running = [[1, "test_prompt_long_123", {}]]
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"queue_running": [], "queue_pending": []}).encode("utf-8"))
+            self.wfile.write(json.dumps({"queue_running": running, "queue_pending": []}).encode("utf-8"))
             return
 
         self.send_response(404)
@@ -927,6 +939,129 @@ def run_tests():
     finally:
         MockComfyUISimulator.simulate_error = False
         shutil.rmtree(tmp_err_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Teste 12: Estágio Finalizando (Timeout 1800s, Falha Rápida e Dump de Log)
+    # =========================================================================
+    print("\n--- Teste 12: Estágio Finalizando, Falha Rápida e Dump de Log ---")
+    tmp_t12_dir = tempfile.mkdtemp(prefix="test_t12_")
+
+    try:
+        # 12a. Dump de log do ComfyUI antes do timeout
+        fake_log = os.path.join(tmp_t12_dir, "fake_comfyui.log")
+        with open(fake_log, "w", encoding="utf-8") as f:
+            for i in range(1, 101):
+                f.write(f"Linha {i}: ComfyUI processing node step {i}\n")
+
+        fake_drive_logs = os.path.join(tmp_t12_dir, "drive_logs")
+        orig_comfy_log = api.COMFYUI_LOG_PATH
+        orig_drive_logs = api.DRIVE_LOGS_DIR
+        api.COMFYUI_LOG_PATH = fake_log
+        api.DRIVE_LOGS_DIR = fake_drive_logs
+
+        t12_task_log = os.path.join(tmp_t12_dir, "task_t12.log")
+        api.dump_comfyui_log_on_timeout(t12_task_log)
+
+        # Verificar se as últimas 80 linhas foram anexadas ao task log
+        with open(t12_task_log, "r", encoding="utf-8") as f:
+            task_log_txt = f.read()
+        assert "DUMP DIAGNÓSTICO COMFYUI.LOG" in task_log_txt
+        assert "Linha 100: ComfyUI processing node step 100" in task_log_txt
+        assert "Linha 21: ComfyUI processing node step 21" in task_log_txt
+        assert "Linha 20: ComfyUI processing node step 20" not in task_log_txt  # Apenas as últimas 80 linhas (21 a 100)
+
+        # Verificar se arquivo datado foi criado no Google Drive
+        drive_files = os.listdir(fake_drive_logs)
+        assert len(drive_files) == 1 and drive_files[0].startswith("comfyui_timeout_")
+        with open(os.path.join(fake_drive_logs, drive_files[0]), "r", encoding="utf-8") as f:
+            drive_log_txt = f.read()
+        assert "Linha 100" in drive_log_txt and "Linha 21" in drive_log_txt
+        print(" [OK] Dump de log leu exatamente as últimas 80 linhas e salvou no log da tarefa e no Google Drive.")
+
+        # Teste quando o log não existe
+        api.COMFYUI_LOG_PATH = os.path.join(tmp_t12_dir, "inexistente.log")
+        t12_task_log_no_file = os.path.join(tmp_t12_dir, "task_no_file.log")
+        api.dump_comfyui_log_on_timeout(t12_task_log_no_file)
+        with open(t12_task_log_no_file, "r", encoding="utf-8") as f:
+            assert "não encontrado para dump de diagnóstico" in f.read()
+        print(" [OK] Ausência de log do ComfyUI foi registrada corretamente sem erro fatal.")
+
+        # 12b. Falha rápida quando o prompt sumiu da fila sem histórico no estágio finalizando
+        sample_img12 = os.path.join(tmp_t12_dir, "face12.png")
+        Image.new("RGB", (256, 256), color=(50, 150, 200)).save(sample_img12)
+        sample_vid12 = os.path.join(tmp_t12_dir, "motion12.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=256x256:rate=24", "-c:v", "libx264", "-pix_fmt", "yuv420p", sample_vid12],
+            check=True, capture_output=True
+        )
+
+        MockComfyUISimulator.history_empty = True
+        MockComfyUISimulator.queue_running_prompt = False  # Prompt NÃO está na fila
+        MockComfyUISimulator.interrupt_count = 0
+
+        tid_fast_fail = "task_fast_fail_finalizing"
+        t_work_ff = os.path.join(tmp_t12_dir, tid_fast_fail)
+        os.makedirs(t_work_ff, exist_ok=True)
+        api.TASKS[tid_fast_fail] = {"task_id": tid_fast_fail, "status": "started"}
+
+        orig_tracker_init = api.ComfyUIProgressTracker.__init__
+        def mock_tracker_init(self, comfy_url, client_id, prompt_id, sampler_node_id=None):
+            orig_tracker_init(self, comfy_url, client_id, prompt_id, sampler_node_id)
+            self.current_chunk = 6
+            self.total_chunks = 6
+
+        api.ComfyUIProgressTracker.__init__ = mock_tracker_init
+        try:
+            start_ff = time.time()
+            api.background_viggle_worker(
+                tid_fast_fail, t_work_ff, sample_img12, sample_vid12, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+            )
+            elapsed_ff = time.time() - start_ff
+            assert api.TASKS[tid_fast_fail]["status"] in ("error", "failed")
+            assert "ComfyUI finalizou o processamento do prompt sem registrar histórico" in api.TASKS[tid_fast_fail]["error"]
+            assert elapsed_ff < 4.0, f"Falha rápida deve ocorrer em poucos segundos, levou {elapsed_ff}s!"
+            assert MockComfyUISimulator.interrupt_count >= 1
+            print(f" [OK] Falha rápida no estágio finalizando acionada em {elapsed_ff:.2f}s quando prompt sumiu da fila sem histórico.")
+        finally:
+            api.ComfyUIProgressTracker.__init__ = orig_tracker_init
+
+        # 12c. Etapa finalizando respeita FINAL_STAGE_TIMEOUT_S (injetável pequeno nos testes)
+        orig_final_timeout = api.FINAL_STAGE_TIMEOUT_S
+        orig_no_prog_timeout = api.NO_PROGRESS_TIMEOUT_S
+        try:
+            api.NO_PROGRESS_TIMEOUT_S = 0.3
+            api.FINAL_STAGE_TIMEOUT_S = 1.0  # Limite maior para finalização
+            MockComfyUISimulator.history_empty = True
+            MockComfyUISimulator.queue_running_prompt = True  # Prompt AINDA está na fila (executando decodificação)
+            MockComfyUISimulator.interrupt_count = 0
+
+            tid_timeout_final = "task_timeout_finalizing"
+            t_work_tf = os.path.join(tmp_t12_dir, tid_timeout_final)
+            os.makedirs(t_work_tf, exist_ok=True)
+            api.TASKS[tid_timeout_final] = {"task_id": tid_timeout_final, "status": "started"}
+
+            api.ComfyUIProgressTracker.__init__ = mock_tracker_init
+            start_tf = time.time()
+            api.background_viggle_worker(
+                tid_timeout_final, t_work_tf, sample_img12, sample_vid12, None, "original", "padrao", min_duration=5.0, max_duration=5.0
+            )
+            elapsed_tf = time.time() - start_tf
+            assert api.TASKS[tid_timeout_final]["status"] in ("error", "failed")
+            assert elapsed_tf >= 0.9, f"Deveria ter respeitado FINAL_STAGE_TIMEOUT_S (1.0s), durou {elapsed_tf}s"
+            assert "etapa de finalização" in api.TASKS[tid_timeout_final]["error"] or "Ausência de progresso" in api.TASKS[tid_timeout_final]["error"]
+            assert MockComfyUISimulator.interrupt_count >= 1
+            print(f" [OK] Etapa finalizando respeitou FINAL_STAGE_TIMEOUT_S={api.FINAL_STAGE_TIMEOUT_S}s (durou {elapsed_tf:.2f}s) em vez de NO_PROGRESS_TIMEOUT_S.")
+        finally:
+            api.FINAL_STAGE_TIMEOUT_S = orig_final_timeout
+            api.NO_PROGRESS_TIMEOUT_S = orig_no_prog_timeout
+            api.ComfyUIProgressTracker.__init__ = orig_tracker_init
+
+    finally:
+        MockComfyUISimulator.history_empty = False
+        MockComfyUISimulator.queue_running_prompt = False
+        api.COMFYUI_LOG_PATH = orig_comfy_log
+        api.DRIVE_LOGS_DIR = orig_drive_logs
+        shutil.rmtree(tmp_t12_dir, ignore_errors=True)
 
     # Limpeza do diretório base de testes se criado
     if created_temp_root and os.path.exists(created_temp_root):
