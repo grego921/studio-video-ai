@@ -2056,7 +2056,7 @@
       }
 
       // 4 & 7. Polling assíncrono sem limite de 300 polls e com persistência/retomada no localStorage
-      async function runGpuTaskPolling(taskId, cleanGpuUrl) {
+      async function runGpuTaskPolling(taskId, cleanGpuUrl, isInitialRestore = false) {
         if (!taskId || !cleanGpuUrl) return;
 
         progressBox.classList.remove('hidden');
@@ -2076,6 +2076,8 @@
 
         let isDone = false;
         let consecutiveNetErrors = 0;
+        let netErrorStartTime = null;
+        let isFirstPoll = true;
         let lastStage = 'init';
         let lastElapsedS = 0;
         let lastLogTail = [];
@@ -2093,6 +2095,22 @@
             } catch(e) {
               netFailed = true;
             }
+
+            // Se for restauração inicial e a primeira consulta falhar com 404 ou erro de rede:
+            // descartar a tarefa salva em silêncio e mostrar o formulário normal, sem alerta de erro.
+            if (isInitialRestore && isFirstPoll) {
+              if (netFailed || (pollRes && pollRes.status === 404)) {
+                console.log('ℹ️ Tarefa salva antiga inexistente ou inacessível no Colab. Descartando silenciosamente.');
+                localStorage.removeItem('studio_active_task_id');
+                localStorage.removeItem('studio_active_task_url');
+                progressBox.classList.add('hidden');
+                progressBox.style.display = 'none';
+                submitBtn.disabled = false;
+                submitBtnText.textContent = 'Gerar Vídeo Agora';
+                return;
+              }
+            }
+            isFirstPoll = false;
 
             // 1. Falha de rede/health NÃO deve abortar nem apagar task_id
             if (netFailed) {
@@ -2186,8 +2204,9 @@
             await new Promise(r => setTimeout(r, 3000));
           }
         } catch (gpuErr) {
+          const rawMsg = (gpuErr && (gpuErr.message || (typeof gpuErr === 'string' ? gpuErr : ''))) || 'Erro inesperado no acompanhamento da tarefa.';
           // Limpa localStorage apenas se for 404 ou erro retornado pelo servidor
-          if (gpuErr.message.includes('perdeu a tarefa') || gpuErr.message.includes('Erro interno') || gpuErr.message.includes('Tempo limite excedido')) {
+          if (rawMsg.includes('perdeu a tarefa') || rawMsg.includes('Erro interno') || rawMsg.includes('Tempo limite excedido') || rawMsg.includes('404')) {
             localStorage.removeItem('studio_active_task_id');
             localStorage.removeItem('studio_active_task_url');
           }
@@ -2196,16 +2215,20 @@
           progressBarFillEl.style.width = '100%';
           progressBarFillEl.style.background = '#ef4444';
           progressPctLabel.textContent = 'Erro';
-          progressStatusMsg.innerHTML = `<span style="color:#ef4444; font-weight:700;">❌ ${gpuErr.message.split('\n')[0]}</span>`;
+
+          let displayMsg = rawMsg.split('\n')[0];
+          if (rawMsg.includes('is not defined') || rawMsg.includes('Cannot read property') || rawMsg.includes('TypeError') || rawMsg.includes('ReferenceError')) {
+            displayMsg = `Erro inesperado na interface: ${displayMsg}. Atualize a página e tente novamente.`;
+          }
+          progressStatusMsg.innerHTML = `<span style="color:#ef4444; font-weight:700;">❌ ${displayMsg}</span>`;
 
           const logBox = document.getElementById('gpuLogTailBox');
           if (logBox) {
             logBox.style.display = 'block';
             logBox.style.borderColor = '#ef4444';
-            logBox.textContent = gpuErr.message;
+            logBox.textContent = rawMsg;
           }
           console.error('Falha na renderização neural:', gpuErr);
-          alert('❌ ' + gpuErr.message);
         }
       }
 
@@ -2573,10 +2596,22 @@
 
       // 7. Retoma polling se houver tarefa pendente salva no localStorage ao recarregar a página
       const pendingTaskId = localStorage.getItem('studio_active_task_id');
-      const pendingTaskUrl = localStorage.getItem('studio_active_task_url') || savedGpuUrl;
-      if (pendingTaskId && pendingTaskUrl) {
-        console.log('🔄 Retomando polling da tarefa salva:', pendingTaskId);
-        runGpuTaskPolling(pendingTaskId, pendingTaskUrl);
+      const pendingTaskUrl = localStorage.getItem('studio_active_task_url');
+      const currentGpuEngineUrl = (savedGpuUrl || localStorage.getItem('studio_gpu_bridge_url') || (gpuBridgeUrlInput ? gpuBridgeUrlInput.value : '') || '').trim().replace(/\/+$/, '');
+      const cleanPendingTaskUrl = (pendingTaskUrl || '').trim().replace(/\/+$/, '');
+
+      if (pendingTaskId) {
+        // Se a URL salva for diferente da URL atual do motor GPU (ou inexistente):
+        if (!cleanPendingTaskUrl || !currentGpuEngineUrl || cleanPendingTaskUrl !== currentGpuEngineUrl) {
+          console.log('ℹ️ Tarefa salva descartada: URL da tarefa salva diferente da URL atual do motor GPU.');
+          localStorage.removeItem('studio_active_task_id');
+          localStorage.removeItem('studio_active_task_url');
+        } else {
+          console.log('🔄 Retomando polling da tarefa salva:', pendingTaskId);
+          runGpuTaskPolling(pendingTaskId, cleanPendingTaskUrl, true);
+        }
+      } else if (pendingTaskUrl) {
+        localStorage.removeItem('studio_active_task_url');
       }
 
       // Notificação de áudio sem sincronia labial no Viggle-Animate
