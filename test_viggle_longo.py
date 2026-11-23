@@ -421,7 +421,9 @@ def run_tests():
     node_windowed = next((n for n in wf_longo.values() if n.get("class_type") == "ViggleAnimateConditioningWindowed"), None)
     assert node_windowed is not None
     assert node_windowed["inputs"]["chunk_frames"] == 124
-    print(" [OK] ViggleAnimateConditioningWindowed: chunk_frames == 124.")
+    assert node_windowed["inputs"]["continuation"] in ["five_frame_anchor", "latent_overlap"]
+    assert node_windowed["inputs"]["overlap_frames"] == 22
+    print(" [OK] ViggleAnimateConditioningWindowed: chunk_frames == 124, continuation e overlap_frames validados.")
 
     # =========================================================================
     # Teste 2: Regra de Duração
@@ -1293,39 +1295,47 @@ def run_tests():
             ]
             subprocess.run(cmd, check=True, capture_output=True)
 
-        # Simular plano de janelas para 322 quadros (spans: [0, 123], [119, 242], [204, 327])
-        b1_file = os.path.join(tmp_t16_dir, "viggle_bloco_00001_.mp4")
-        b2_file = os.path.join(tmp_t16_dir, "viggle_bloco_00002_.mp4")
-        b3_file = os.path.join(tmp_t16_dir, "viggle_bloco_00003_.mp4")
-        make_synthetic_block(0, 123, b1_file)
-        make_synthetic_block(119, 242, b2_file)
-        make_synthetic_block(204, 327, b3_file)
+        test_modes = [
+            ("five_frame_anchor", 5, [(0, 123), (119, 242), (204, 327)], "anchor_out.mp4"),
+            ("latent_overlap", 22, [(0, 123), (102, 225), (204, 327)], "latent_out.mp4")
+        ]
 
-        assembled_out = os.path.join(tmp_t16_dir, "assembled_out.mp4")
-        t16_log = os.path.join(tmp_t16_dir, "task_t16.log")
+        for mode_name, ov_f, spans_list, out_filename in test_modes:
+            mode_dir = os.path.join(tmp_t16_dir, mode_name)
+            os.makedirs(mode_dir, exist_ok=True)
+            calc_spans = api.plan_viggle_spans(322, chunk_f=124, overlap_f=ov_f)
+            expected_spans_ranges = [(s[0], s[1]) for s in calc_spans]
+            assert expected_spans_ranges == spans_list, f"Spans divergiram no modo {mode_name}: {expected_spans_ranges} vs {spans_list}"
 
-        res_path = api.assemble_viggle_chunks(
-            work_dir=tmp_t16_dir,
-            comfy_dir=tmp_t16_dir,
-            run_name="test_run",
-            target_frames=322,
-            task_log_path=t16_log,
-            output_mp4_path=assembled_out
-        )
-        assert os.path.exists(assembled_out) and os.path.getsize(assembled_out) > 0
+            for idx, (sf, ef) in enumerate(spans_list):
+                bf = os.path.join(mode_dir, f"viggle_bloco_{idx+1:05d}_.mp4")
+                make_synthetic_block(sf, ef, bf)
 
-        # Extrair todos os quadros e verificar contagem exata e sequência contínua
-        extract_dir = os.path.join(tmp_t16_dir, "extracted")
-        os.makedirs(extract_dir, exist_ok=True)
-        subprocess.run(["ffmpeg", "-y", "-i", assembled_out, os.path.join(extract_dir, "frame_%05d.png")], check=True, capture_output=True)
-        extracted = sorted(os.listdir(extract_dir))
-        assert len(extracted) == 322, f"Esperado exatamente 322 quadros, obteve {len(extracted)}"
+            assembled_out = os.path.join(mode_dir, out_filename)
+            t16_log = os.path.join(mode_dir, "task.log")
 
-        # Decodificar os IDs de quadro e validar continuidade estrita sem saltos ou duplicatas
-        frame_vals = [decode_frame_id(Image.open(os.path.join(extract_dir, fn))) for fn in extracted]
-        expected_vals = list(range(322))
-        assert frame_vals == expected_vals, f"Sequência de quadros desalinhada! Mismatch no índice: {[(i, frame_vals[i], expected_vals[i]) for i in range(len(frame_vals)) if frame_vals[i] != expected_vals[i]][:5]}"
-        print(f" [OK] Montagem de 3 blocos recortou sobreposições e gerou exatamente 322 quadros contínuos sem saltos nem repetições.")
+            api.assemble_viggle_chunks(
+                work_dir=mode_dir,
+                comfy_dir=mode_dir,
+                run_name=f"test_run_{mode_name}",
+                target_frames=322,
+                task_log_path=t16_log,
+                output_mp4_path=assembled_out,
+                continuation_mode=mode_name,
+                overlap_frames=ov_f
+            )
+            assert os.path.exists(assembled_out) and os.path.getsize(assembled_out) > 0
+
+            extract_dir = os.path.join(mode_dir, "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            subprocess.run(["ffmpeg", "-y", "-i", assembled_out, os.path.join(extract_dir, "frame_%05d.png")], check=True, capture_output=True)
+            extracted = sorted(os.listdir(extract_dir))
+            assert len(extracted) == 322, f"Modo {mode_name}: Esperado exatamente 322 quadros, obteve {len(extracted)}"
+
+            frame_vals = [decode_frame_id(Image.open(os.path.join(extract_dir, fn))) for fn in extracted]
+            expected_vals = list(range(322))
+            assert frame_vals == expected_vals, f"Modo {mode_name}: Sequência de quadros desalinhada!"
+            print(f" [OK] Modo '{mode_name}' (overlap {ov_f} quadros): montagem de blocos gerou exatamente 322 quadros contínuos sem saltos nem repetições.")
 
     finally:
         shutil.rmtree(tmp_t16_dir, ignore_errors=True)
@@ -1348,9 +1358,10 @@ def run_tests():
     assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 99999, "padrao", 720), "Seed diferente deve mudar run_name"
     assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "rapido", 720), "Qualidade diferente deve mudar run_name"
     assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "padrao", 360), "Duração diferente deve mudar run_name"
+    assert r1 != api.compute_viggle_run_name("hash_img1", "hash_vid1", 12345, "padrao", 720, continuation_mode="latent_overlap"), "Modo de continuação diferente deve mudar run_name"
     print(" [OK] Cálculo determinístico de run_name validado com sensibilidade estrita a todos os parâmetros.")
 
-    # 17c. Seleção de workflow
+    # 17c. Seleção de workflow e aplicação de VIGGLE_CONTINUATION
     # <= 124 quadros usa viggle_api.json
     # > 124 quadros usa viggle_longo_blocos_api.json
     try:
@@ -1359,8 +1370,10 @@ def run_tests():
 
         tid_short_wf = "task_short_wf_check"
         tid_long_wf = "task_long_wf_check"
+        tid_latent_wf = "task_latent_wf_check"
         api.TASKS[tid_short_wf] = {"task_id": tid_short_wf, "status": "started"}
         api.TASKS[tid_long_wf] = {"task_id": tid_long_wf, "status": "started"}
+        api.TASKS[tid_latent_wf] = {"task_id": tid_latent_wf, "status": "started"}
 
         tmp_wf_check = tempfile.mkdtemp(prefix="test_wf_check_")
         t_img_ck = os.path.join(tmp_wf_check, "img.png")
@@ -1376,16 +1389,37 @@ def run_tests():
         assert "SamplerCustomAdvanced" in sampler_classes, "Workflow curto deve usar SamplerCustomAdvanced"
         assert "ViggleChunkLoopStart" not in sampler_classes, "Workflow curto não deve ter loop"
 
-        # Longo (min=15, max=15) -> 360 quadros
+        # Longo padrão (five_frame_anchor)
+        os.environ.pop("VIGGLE_CONTINUATION", None)
         api.background_viggle_worker(tid_long_wf, os.path.join(tmp_wf_check, "long"), t_img_ck, t_vid_ck, None, "original", "padrao", 15.0, 15.0)
         assert api.TASKS[tid_long_wf]["workflow_mode"] == "longo", "Pedido > 124 quadros deve ser modo longo"
         assert MockComfyUISimulator.last_prompt is not None
         long_sampler_classes = [n.get("class_type") for n in MockComfyUISimulator.last_prompt.values()]
         assert "ViggleChunkLoopStart" in long_sampler_classes, "Workflow longo deve usar ViggleChunkLoopStart (modo blocos)"
         assert "ViggleSampleChunk" in long_sampler_classes, "Workflow longo deve usar ViggleSampleChunk"
+        windowed_node_def = next((n for n in MockComfyUISimulator.last_prompt.values() if n.get("class_type") == "ViggleAnimateConditioningWindowed"), None)
+        assert windowed_node_def is not None
+        assert windowed_node_def["inputs"]["continuation"] == "five_frame_anchor"
+        assert windowed_node_def["inputs"]["overlap_frames"] == 22
 
-        print(" [OK] Seleção correta de workflow verificada: curto para <=124 quadros, longo em blocos para >124 quadros.")
+        # Longo com VIGGLE_CONTINUATION=latent_overlap
+        os.environ["VIGGLE_CONTINUATION"] = "latent_overlap"
+        api.background_viggle_worker(tid_latent_wf, os.path.join(tmp_wf_check, "long_latent"), t_img_ck, t_vid_ck, None, "original", "padrao", 15.0, 15.0)
+        assert MockComfyUISimulator.last_prompt is not None
+        windowed_latent_def = next((n for n in MockComfyUISimulator.last_prompt.values() if n.get("class_type") == "ViggleAnimateConditioningWindowed"), None)
+        assert windowed_latent_def is not None
+        assert windowed_latent_def["inputs"]["continuation"] == "latent_overlap"
+        assert windowed_latent_def["inputs"]["overlap_frames"] == 22
+        t_latent_log = os.path.join(tmp_wf_check, "long_latent", "task_viggle.log")
+        if os.path.exists(t_latent_log):
+            with open(t_latent_log, "r", encoding="utf-8") as f:
+                log_c = f.read()
+            assert "Modo de continuação Viggle selecionado: 'latent_overlap'" in log_c
+        os.environ.pop("VIGGLE_CONTINUATION", None)
+
+        print(" [OK] Seleção correta de workflow e configuração dinâmica de VIGGLE_CONTINUATION ('five_frame_anchor' e 'latent_overlap') verificadas.")
     finally:
+        os.environ.pop("VIGGLE_CONTINUATION", None)
         shutil.rmtree(tmp_wf_check, ignore_errors=True)
 
     # =========================================================================

@@ -567,8 +567,9 @@ def convert_workflow(wf_ui: dict, object_info: dict) -> dict:
             api_node["inputs"]["sampler_name"] = "euler"
 
         elif ctype == "ViggleAnimateConditioningWindowed":
+            continuation_mode = "latent_overlap" if os.environ.get("VIGGLE_CONTINUATION", "").strip() == "latent_overlap" else "five_frame_anchor"
             api_node["inputs"]["chunk_frames"] = 124
-            api_node["inputs"]["continuation"] = "five_frame_anchor"
+            api_node["inputs"]["continuation"] = continuation_mode
             api_node["inputs"]["overlap_frames"] = 22
 
         elif ctype == "LoraLoaderModelOnly":
