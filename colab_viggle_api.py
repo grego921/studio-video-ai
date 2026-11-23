@@ -524,12 +524,23 @@ def compute_deterministic_seed(image_hash: str, motion_hash: str) -> int:
     h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return int(h[:8], 16) % (2 ** 31 - 1)
 
-def compute_viggle_run_name(image_ref: str, motion_ref: str, seed: int, quality: str, target_frames_or_duration) -> str:
+def get_viggle_continuation_mode() -> str:
+    """
+    Lê a variável de ambiente VIGGLE_CONTINUATION.
+    Valores suportados: 'five_frame_anchor' (padrão) ou 'latent_overlap'.
+    """
+    mode = os.environ.get("VIGGLE_CONTINUATION", "five_frame_anchor").strip()
+    if mode == "latent_overlap":
+        return "latent_overlap"
+    return "five_frame_anchor"
+
+def compute_viggle_run_name(image_ref: str, motion_ref: str, seed: int, quality: str, target_frames_or_duration, continuation_mode: str = None) -> str:
     """
     Gera run_name determinístico em conformidade com regex ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$.
     Mesmos parâmetros = mesmo run_name; parâmetros diferentes = run_name diferente.
     """
-    raw = f"{image_ref}_{motion_ref}_{seed}_{quality}_{target_frames_or_duration}"
+    cont = continuation_mode or get_viggle_continuation_mode()
+    raw = f"{image_ref}_{motion_ref}_{seed}_{quality}_{target_frames_or_duration}_{cont}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return f"viggle_{digest}"
 
@@ -816,15 +827,21 @@ def assemble_viggle_chunks(
     target_frames: int,
     task_log_path: str,
     output_mp4_path: str,
-    history_outputs: dict = None
+    history_outputs: dict = None,
+    continuation_mode: str = None,
+    overlap_frames: int = None
 ) -> str:
     """
     Coleta os arquivos de vídeo dos blocos, calcula as sobreposições de acordo com plan_viggle_spans,
     remove os quadros redundantes das cabeças dos blocos 2..N, concatena com FFmpeg e corta
     exatamente no target_frames pedido.
     """
-    spans = plan_viggle_spans(target_frames, chunk_f=124, overlap_f=5)
-    append_task_log(task_log_path, f"Plano de janelas: {len(spans)} bloco(s) planejado(s) para {target_frames} quadros alvo.")
+    if continuation_mode is None:
+        continuation_mode = get_viggle_continuation_mode()
+    effective_overlap = (overlap_frames if overlap_frames is not None else 22) if continuation_mode == "latent_overlap" else 5
+
+    spans = plan_viggle_spans(target_frames, chunk_f=124, overlap_f=effective_overlap)
+    append_task_log(task_log_path, f"Plano de janelas (modo '{continuation_mode}', overlap={effective_overlap}): {len(spans)} bloco(s) planejado(s) para {target_frames} quadros alvo.")
 
     search_dirs = [
         os.path.join(comfy_dir, "output", "viggle_chunks", run_name) if run_name else None,
@@ -863,10 +880,10 @@ def assemble_viggle_chunks(
             trim = max(0, current_end - ak + 1)
             current_end = bk
         else:
-            trim = 5
+            trim = effective_overlap
         trim_heads.append(trim)
 
-    append_task_log(task_log_path, f"Sobreposições a remover da cabeça dos blocos: {trim_heads}")
+    append_task_log(task_log_path, f"Sobreposições a remover da cabeça dos blocos (modo '{continuation_mode}'): {trim_heads}")
 
     filter_parts = []
     stream_names = []
@@ -1750,7 +1767,10 @@ def background_viggle_worker(
             append_task_log(task_log_path, f"Nó SEED [{nid_seed}] configurado com semente {new_seed}")
 
         # Configurações específicas de modo (chunk_frames no longo, length no curto, run_name no loop)
+        continuation_mode = get_viggle_continuation_mode()
+        effective_overlap = 22 if continuation_mode == "latent_overlap" else 5
         if is_long_mode:
+            append_task_log(task_log_path, f"Modo de continuação Viggle selecionado: '{continuation_mode}' (overlap_frames={effective_overlap})")
             ensure_viggle_chunks_local_dir(comfy_dir=COMFYUI_DIR, task_log_path=task_log_path)
             if run_name:
                 restore_viggle_checkpoints_from_drive(
@@ -1762,8 +1782,11 @@ def background_viggle_worker(
             for nid, n in workflow.items():
                 if isinstance(n, dict):
                     if n.get("class_type") == "ViggleAnimateConditioningWindowed":
-                        n.setdefault("inputs", {})["chunk_frames"] = 124
-                        append_task_log(task_log_path, f"Nó ViggleAnimateConditioningWindowed [{nid}] configurado com chunk_frames=124")
+                        inputs = n.setdefault("inputs", {})
+                        inputs["chunk_frames"] = 124
+                        inputs["continuation"] = continuation_mode
+                        inputs["overlap_frames"] = 22
+                        append_task_log(task_log_path, f"Nó ViggleAnimateConditioningWindowed [{nid}] configurado com chunk_frames=124, continuation='{continuation_mode}', overlap_frames=22")
                     elif n.get("class_type") == "ViggleChunkLoopStart" and run_name:
                         n.setdefault("inputs", {})["run_name"] = run_name
                         n["inputs"]["resume"] = True
@@ -2119,7 +2142,9 @@ def background_viggle_worker(
                     target_frames=target_frames,
                     task_log_path=task_log_path,
                     output_mp4_path=task_out_mp4,
-                    history_outputs=outputs
+                    history_outputs=outputs,
+                    continuation_mode=continuation_mode,
+                    overlap_frames=effective_overlap
                 )
             except Exception as e_ass:
                 append_task_log(task_log_path, f"Aviso na montagem em blocos: {e_ass}. Tentando localização padrão.")
