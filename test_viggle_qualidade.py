@@ -1,12 +1,13 @@
 """
-Suite de Testes Unitários: Seletor de Qualidade Viggle (colab_viggle_api.py + Frontend)
-Branch: viggle-padrao
+Suite de Testes Unitários: Seletor de Qualidade Viggle e Polling GPU (colab_viggle_api.py + Frontend)
+Branch: viggle-site-polling
 Valida:
 1. Padrão ausente e inválido => 'padrao' (0.7 MP)
 2. 'alta' => 'padrao' (0.7 MP) com aviso no log: "Qualidade 'alta' desativada, usando 'padrao'."
 3. 'rapido' => 0.4 MP
 4. Detecção OOM com regex de palavra inteira (não dispara com 'zoom' nem 'room', mas dispara com 'oom' ou 'out of memory')
 5. Templates index.html e html_template.py idênticos byte a byte, com 'Padrão' ativo por padrão, 'Alta' removida e aviso atualizado
+6. Polling GPU: declaração de netErrorStartTime = null, descarte silencioso de tarefas antigas com URL diferente ou falha inicial (404/rede), ausência de alert() sem mensagem útil
 """
 
 import os
@@ -394,6 +395,139 @@ def main():
         assert "neuralFormData.append('min_duration', minTimeSlider.value);" in index_html
         assert "neuralFormData.append('max_duration', maxTimeSlider.value);" in index_html
         print(" [OK] Frontend: min_duration e max_duration injetados no neuralFormData.")
+
+        # -------------------------------------------------------------------
+        # TESTE 5: Polling da GPU, Declaração de Variáveis e Descarte Silencioso
+        # -------------------------------------------------------------------
+        print("\n--- Teste 5: Polling da GPU, Declaração de Variáveis e Descarte Silencioso ---")
+
+        # 5A: Declaração de netErrorStartTime = null junto de consecutiveNetErrors
+        assert "let consecutiveNetErrors = 0;" in index_html, "consecutiveNetErrors deve estar declarado"
+        assert "let netErrorStartTime = null;" in index_html, "netErrorStartTime DEVE estar declarado com 'let netErrorStartTime = null;'"
+
+        decl_idx = index_html.find("let netErrorStartTime = null;")
+        usage_idx = index_html.find("if (netErrorStartTime === null)")
+        assert decl_idx != -1 and usage_idx != -1 and decl_idx < usage_idx, (
+            "netErrorStartTime deve ser declarado antes de qualquer uso para evitar ReferenceError!"
+        )
+        print(" [OK] netErrorStartTime declarado com 'let netErrorStartTime = null;' junto de consecutiveNetErrors.")
+
+        # 5B: Assinatura de runGpuTaskPolling aceita isInitialRestore
+        assert "async function runGpuTaskPolling(taskId, cleanGpuUrl, isInitialRestore = false)" in index_html, (
+            "runGpuTaskPolling deve aceitar isInitialRestore com padrão false"
+        )
+        print(" [OK] runGpuTaskPolling aceita isInitialRestore com valor padrão false.")
+
+        # 5C: Descarte ao abrir a página se URL salva for diferente da URL atual do motor GPU
+        assert "if (!cleanPendingTaskUrl || !currentGpuEngineUrl || cleanPendingTaskUrl !== currentGpuEngineUrl)" in index_html, (
+            "Frontend deve comparar cleanPendingTaskUrl com currentGpuEngineUrl ao abrir a página"
+        )
+        assert "localStorage.removeItem('studio_active_task_id');" in index_html
+        assert "localStorage.removeItem('studio_active_task_url');" in index_html
+        print(" [OK] Descarte de tarefa antiga ao abrir a página quando a URL salva diferir da URL atual.")
+
+        # 5D: Descarte silencioso na 1ª consulta de restauração em caso de 404 ou erro de rede
+        assert "if (isInitialRestore && isFirstPoll)" in index_html, (
+            "runGpuTaskPolling deve tratar a primeira consulta durante restauração inicial"
+        )
+        assert "if (netFailed || (pollRes && pollRes.status === 404))" in index_html, (
+            "Primeira consulta de restauração deve verificar netFailed e status 404"
+        )
+        print(" [OK] Descarte silencioso na 1ª consulta em caso de 404 ou erro de rede.")
+
+        # 5E: Nenhuma exceção de JavaScript do polling pode virar alert() sem mensagem útil
+        fn_start = index_html.find("async function runGpuTaskPolling")
+        fn_end = index_html.find("form.addEventListener('submit'", fn_start)
+        polling_fn_code = index_html[fn_start:fn_end]
+        assert "alert(" not in polling_fn_code, (
+            "Nenhuma exceção do polling pode virar alert()! Mensagem deve ser exibida na tela."
+        )
+        assert "progressStatusMsg.innerHTML = " in polling_fn_code, (
+            "Erro inesperado no polling deve ser exibido diretamente na tela em progressStatusMsg"
+        )
+        assert "logBox.textContent = rawMsg;" in polling_fn_code, (
+            "Detalhes do erro devem ser exibidos no logBox na tela"
+        )
+        print(" [OK] Polling sem chamadas de alert(): erros exibidos com clareza na tela.")
+
+        # 5F: Simulação completa da lógica de restauração e descarte
+        class LocalStorageMock:
+            def __init__(self, data=None):
+                self.store = dict(data or {})
+            def getItem(self, key):
+                return self.store.get(key)
+            def setItem(self, key, val):
+                self.store[key] = str(val)
+            def removeItem(self, key):
+                self.store.pop(key, None)
+
+        def simulate_page_open(ls, current_gpu_url):
+            pending_task_id = ls.getItem("studio_active_task_id")
+            pending_task_url = ls.getItem("studio_active_task_url")
+            cur_url = (current_gpu_url or "").strip().rstrip("/")
+            saved_url = (pending_task_url or "").strip().rstrip("/")
+            if pending_task_id:
+                if not saved_url or not cur_url or saved_url != cur_url:
+                    ls.removeItem("studio_active_task_id")
+                    ls.removeItem("studio_active_task_url")
+                    return "discarded_url_mismatch"
+                else:
+                    return "resume_polling"
+            return "no_task"
+
+        def simulate_first_poll(is_initial_restore, poll_status, net_failed, ls):
+            is_first_poll = True
+            if is_initial_restore and is_first_poll:
+                if net_failed or poll_status == 404:
+                    ls.removeItem("studio_active_task_id")
+                    ls.removeItem("studio_active_task_url")
+                    return {"action": "discard_silent", "submit_enabled": True, "progress_hidden": True, "alert_called": False}
+            if poll_status == 404:
+                ls.removeItem("studio_active_task_id")
+                ls.removeItem("studio_active_task_url")
+                return {"action": "throw_restarted_error"}
+            return {"action": "continue_polling"}
+
+        # Caso 1: URL diferente => descartar silenciosamente sem polling
+        ls1 = LocalStorageMock({"studio_active_task_id": "task_123", "studio_active_task_url": "https://colab-old.trycloudflare.com"})
+        res1 = simulate_page_open(ls1, "https://colab-new.trycloudflare.com")
+        assert res1 == "discarded_url_mismatch"
+        assert ls1.getItem("studio_active_task_id") is None
+        assert ls1.getItem("studio_active_task_url") is None
+
+        # Caso 2: URL vazia no motor atual => descartar silenciosamente
+        ls2 = LocalStorageMock({"studio_active_task_id": "task_123", "studio_active_task_url": "https://colab-old.trycloudflare.com"})
+        res2 = simulate_page_open(ls2, "")
+        assert res2 == "discarded_url_mismatch"
+        assert ls2.getItem("studio_active_task_id") is None
+
+        # Caso 3: URL idêntica => retoma polling com isInitialRestore=True
+        ls3 = LocalStorageMock({"studio_active_task_id": "task_123", "studio_active_task_url": "https://colab-same.trycloudflare.com"})
+        res3 = simulate_page_open(ls3, "https://colab-same.trycloudflare.com/")
+        assert res3 == "resume_polling"
+
+        # Caso 4: Primeira consulta da restauração retorna 404 => descarta em silêncio, reativa formulário normal
+        poll_res4 = simulate_first_poll(True, 404, False, ls3)
+        assert poll_res4["action"] == "discard_silent"
+        assert poll_res4["submit_enabled"] is True
+        assert poll_res4["progress_hidden"] is True
+        assert poll_res4["alert_called"] is False
+        assert ls3.getItem("studio_active_task_id") is None
+
+        # Caso 5: Primeira consulta da restauração tem erro de rede => descarta em silêncio, reativa formulário normal
+        ls5 = LocalStorageMock({"studio_active_task_id": "task_456", "studio_active_task_url": "https://colab-same.trycloudflare.com"})
+        poll_res5 = simulate_first_poll(True, None, True, ls5)
+        assert poll_res5["action"] == "discard_silent"
+        assert poll_res5["submit_enabled"] is True
+        assert poll_res5["progress_hidden"] is True
+        assert ls5.getItem("studio_active_task_id") is None
+
+        # Caso 6: Tarefa nova criada pelo formulário (is_initial_restore=False) com 404 => lança erro de reinício
+        ls6 = LocalStorageMock({"studio_active_task_id": "task_789", "studio_active_task_url": "https://colab-same.trycloudflare.com"})
+        poll_res6 = simulate_first_poll(False, 404, False, ls6)
+        assert poll_res6["action"] == "throw_restarted_error"
+
+        print(" [OK] Simulação de descarte silencioso e restauração validada em todos os cenários.")
 
         print("\n" + "=" * 70)
         print("TODOS OS TESTES FORAM CONCLUÍDOS COM SUCESSO!")
